@@ -13,10 +13,47 @@ _Avoid_: Policy entry, condition
 
 **Segment**:
 One parsed unit of a Bash command (tool, subcommand, flags, args), produced
-by splitting a command on pipes, `&&`, `;`, and similar boundaries. Only
-Bash tool calls are broken into segments; other tools are matched directly
-against their `tool_input`.
+by splitting a command on pipes, `&&`, `;`, and similar boundaries. Bash tool
+calls are broken into **Segments**; PowerShell tool calls are broken into
+the structurally distinct **PowerShell-Segment** instead (see below); other
+tools are matched directly against their `tool_input`.
 _Avoid_: Command, statement
+
+**PowerShell-Segment**:
+One parsed unit of a PowerShell command: a **Cmdlet** name (aliases resolved
+to their canonical form, e.g. `ri` → `Remove-Item`) plus its **Parameters**,
+**Switches**, and positional arguments. The PowerShell analogue of a
+**Segment**, but a distinct type — PowerShell parameters commonly carry
+values (`-Uri http://...`), unlike Bash's mostly value-less flags — exposed
+to CEL rules as `ps_segment` (vs. `segment` for Bash).
+_Avoid_: Segment (reserved for Bash), command
+
+**Cmdlet**:
+The canonical Verb-Noun name of a PowerShell command (e.g. `Remove-Item`),
+resolved from any built-in alias (`rm`, `ri`) before being matched against
+policy rules.
+_Avoid_: Command, function
+
+**Parameter**:
+A named PowerShell argument that takes a value (`-Uri http://...`), captured
+on a **PowerShell-Segment**.
+_Avoid_: Flag (Bash-specific term, see **Segment**)
+
+**Switch**:
+A named PowerShell argument with no value — a boolean flag (`-Force`,
+`-Recurse`), captured on a **PowerShell-Segment**.
+_Avoid_: Flag (Bash-specific term, see **Segment**)
+
+**PowerShell opaque guard**:
+The PowerShell-specific analogue of the **Opaque execution guard**: fires
+when a PowerShell command cannot be safely parsed, or contains a construct
+that cannot be safely decomposed into **PowerShell-Segments** (`Invoke-Expression`,
+dot-sourcing, dynamic `&` call-operator targets, `-EncodedCommand`, dynamic
+script-block construction, `Add-Type`, or `if`/`while`/`for`/`foreach`/`switch`
+control structures). Configured and evaluated separately from the Bash
+**Opaque execution guard**, since the two parsers are independent
+implementations with independent risk profiles.
+_Avoid_: Opaque execution guard (reserved for Bash), escape hatch
 
 **Sugar field**:
 A shorthand YAML field on a **Rule** (`tool`, `subcommand`, `deny_flags`,
@@ -46,7 +83,8 @@ _Avoid_: Fallback, catch-all rule
 The preflight check that fires when a Bash command contains a construct that
 cannot be safely decomposed into **Segments** (`eval`, `sh -c`, command
 substitution, etc.). It short-circuits normal rule evaluation entirely,
-distinct from both a **Rule** match and the **Default action**.
+distinct from both a **Rule** match and the **Default action**. Bash-specific;
+see **PowerShell opaque guard** for the PowerShell analogue.
 _Avoid_: Escape hatch, unsafe command
 
 ## Relationships
@@ -63,6 +101,11 @@ _Avoid_: Escape hatch, unsafe command
   **Opaque execution guard** applies *before* rule matching is attempted at
   all, for Bash calls that can't be split into **Segments** in the first
   place.
+- A **PowerShell-Segment** is composed of one **Cmdlet** plus any number of
+  **Parameters** and **Switches**; the **PowerShell opaque guard** applies
+  *before* rule matching for PowerShell calls that can't be split into
+  **PowerShell-Segments**, mirroring the **Opaque execution guard**'s role
+  for Bash.
 
 ## Example dialogue
 
