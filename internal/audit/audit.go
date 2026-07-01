@@ -1,5 +1,5 @@
 // Package audit provides append-only JSONL structured logging for all tool
-// call decisions made by ctool-gate.
+// call decisions made by hookguard.
 package audit
 
 import (
@@ -16,8 +16,11 @@ type Entry struct {
 	Timestamp time.Time `json:"ts"`
 	SessionID string    `json:"session_id,omitempty"`
 	Cwd       string    `json:"cwd,omitempty"`
+	// ToolName is the Claude Code tool invoked, e.g. "Bash", "Read", "Edit".
+	ToolName string `json:"tool_name,omitempty"`
 	// Command is the raw shell command string passed by Claude Code.
-	Command string `json:"cmd"`
+	// Only set for Bash tool calls.
+	Command string `json:"cmd,omitempty"`
 	// Action is the decision: "allow", "deny", or "ask".
 	Action string `json:"action"`
 	// Reason is the human-readable explanation for deny / ask decisions.
@@ -31,7 +34,7 @@ type Entry struct {
 //
 // Concurrent safety: On Linux and macOS, writes appended to a file opened
 // with O_APPEND are atomic for records smaller than PIPE_BUF (4 096 bytes),
-// so simultaneous calls from independent ctool-gate processes (one per Claude
+// so simultaneous calls from independent hookguard processes (one per Claude
 // Code session) are safe without additional locking.
 func Write(path string, entry Entry) error {
 	path = expandHome(path)

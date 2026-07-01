@@ -1,3 +1,4 @@
-ctool-gate
+/hookguard
 *.test
 *.out
+*.exe

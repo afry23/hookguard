@@ -1,0 +1,237 @@
+# hookguard policy — hookguard.yaml
+#
+# Copy to ~/.claude/hookguard.yaml (single developer) or deploy via managed
+# settings for the whole team (set HOOKGUARD_POLICY to the shared path).
+#
+# Actions:  allow | deny | ask
+#   allow — execute without prompting
+#   deny  — block; reason is shown to Claude so it can explain the restriction
+#   ask   — escalate to the user for interactive confirmation
+#
+# Schema: a single `rules:` list, evaluated with CEL. Each rule matches via
+# sugar fields (`tool`/`subcommand`/`deny_flags` for Bash, `tools`/`path` for
+# Read/Edit/Write) and/or a raw `when:` CEL expression. When several rules
+# match the same tool call, the most severe action wins (deny > ask > allow),
+# not the rule that appears first in the list.
+#
+# See README.md for the full schema reference and CEL variable table.
+
+version: 1
+
+# Fallback action when no rule below matches a tool call.
+# "deny" is the secure default: unlisted tools/paths are blocked until
+# explicitly allowed.
+default_action: deny
+
+# Append-only JSONL audit log. Every tool call and its decision is recorded
+# here. Leave empty ("") to disable.
+audit_log: "~/.claude/hookguard-audit.jsonl"
+
+# Fired when a Bash command contains constructs that cannot be safely
+# analysed statically: eval, exec, source, sh -c, xargs, command substitution
+# $(...), arithmetic commands, control structures (if/while/for), etc.
+opaque_execution_guard:
+  action: ask
+
+# PowerShell calls are not parsed at all (Windows); this is the blanket
+# decision for every PowerShell tool call.
+powershell_action: ask
+
+rules:
+
+  # ── git ──────────────────────────────────────────────────────────────────
+  - tool: git
+    action: allow
+    reason: "git is generally safe; specific subcommands/flags are restricted below"
+
+  - tool: git
+    subcommand: push
+    # -f is listed alongside --force since flag_aliases no longer exists.
+    deny_flags: ["--force", "--force-with-lease", "-f"]
+    action: deny
+    reason: "force-push rewrites remote history and bypasses branch protections"
+
+  - tool: git
+    subcommand: commit
+    deny_flags: ["--no-verify", "-n"]
+    action: deny
+    reason: "--no-verify skips pre-commit and commit-msg hooks"
+
+  - tool: git
+    subcommand: tag
+    deny_flags: ["--delete", "-d"]
+    action: deny
+    reason: "deleting tags is destructive"
+
+  - tool: git
+    subcommand: config
+    action: ask
+    reason: "git config can permanently alter the global git setup"
+
+  - tool: git
+    subcommand: config
+    when: >
+      segment.args.exists(a, a.matches("core\\.hooksPath")) ||
+      segment.flags.exists(f, f == "--global")
+    action: deny
+    reason: "overriding core.hooksPath or writing --global config is a hook-bypass technique"
+
+  # ── rm ───────────────────────────────────────────────────────────────────
+  - tool: rm
+    action: ask
+    reason: "always require confirmation for rm"
+
+  # ── curl / wget ──────────────────────────────────────────────────────────
+  - tool: curl
+    action: ask
+    reason: "network egress; ask before sending data out"
+
+  - tool: wget
+    action: ask
+    reason: "network egress; ask before sending data out"
+
+  # ── docker ───────────────────────────────────────────────────────────────
+  # Read-only subcommands are allowed below; this rule excludes them via
+  # `when` so severity resolution doesn't let their `allow` be shadowed by
+  # this broader `ask` (severity is deny > ask > allow, not order or
+  # specificity — see ADR 0004).
+  - tool: docker
+    when: '!(segment.subcommand in ["ps", "images", "build", "logs", "inspect"])'
+    action: ask
+    reason: "docker commands can affect the host; ask by default"
+
+  - tool: docker
+    subcommand: run
+    deny_flags: ["--privileged"]
+    action: deny
+    reason: "--privileged grants full host access"
+
+  - tool: docker
+    subcommand: run
+    when: >
+      segment.args.exists(a, a.matches("^/$")) ||
+      segment.args.exists(a, a.matches("/var/run/docker\\.sock"))
+    action: deny
+    reason: "mounting the root filesystem or the Docker socket is a privilege-escalation vector"
+
+  - tool: docker
+    subcommand: build
+    action: allow
+
+  - tool: docker
+    subcommand: ps
+    action: allow
+
+  - tool: docker
+    subcommand: images
+    action: allow
+
+  - tool: docker
+    subcommand: logs
+    action: allow
+
+  - tool: docker
+    subcommand: inspect
+    action: allow
+
+  # ── npm ──────────────────────────────────────────────────────────────────
+  - tool: npm
+    action: allow
+
+  - tool: npm
+    subcommand: publish
+    action: ask
+    reason: "publishing to a registry is irreversible"
+
+  # ── go ───────────────────────────────────────────────────────────────────
+  - tool: go
+    action: allow
+
+  - tool: go
+    subcommand: generate
+    action: ask
+    reason: "go:generate can run arbitrary programs"
+
+  # ── python / pip ─────────────────────────────────────────────────────────
+  - tool: python
+    action: allow
+  - tool: python3
+    action: allow
+
+  - tool: pip
+    action: allow
+  - tool: pip
+    subcommand: uninstall
+    action: ask
+
+  - tool: pip3
+    action: allow
+  - tool: pip3
+    subcommand: uninstall
+    action: ask
+
+  # ── common unix tools ────────────────────────────────────────────────────
+  - tool: ls
+    action: allow
+  - tool: cat
+    action: allow
+  - tool: grep
+    action: allow
+  - tool: rg
+    action: allow
+  - tool: find
+    action: allow
+  - tool: echo
+    action: allow
+  - tool: pwd
+    action: allow
+  - tool: mkdir
+    action: allow
+  - tool: cp
+    action: allow
+  - tool: mv
+    action: allow
+  - tool: touch
+    action: allow
+  - tool: head
+    action: allow
+  - tool: tail
+    action: allow
+  - tool: wc
+    action: allow
+  - tool: sort
+    action: allow
+  - tool: uniq
+    action: allow
+  - tool: jq
+    action: allow
+  - tool: sed
+    action: allow
+  - tool: awk
+    action: allow
+  - tool: make
+    action: allow
+
+  - tool: sh
+    # "sh script.sh" is treated as a named-script invocation (not opaque).
+    # "sh -c '...'" is caught by the opaque_execution_guard before rules run.
+    action: ask
+  - tool: bash
+    action: ask
+
+  # ── path sugar: sensitive files (Read/Edit/Write) ───────────────────────
+  - tools: ["Read"]
+    path: "**/.env*"
+    action: deny
+    reason: "reading .env files may leak secrets"
+
+  - tools: ["Edit", "Write"]
+    path: "**/secrets/**"
+    action: deny
+    reason: "editing files under secrets/ is not allowed"
+
+  # ── raw when: example — SSH private key blockade ────────────────────────
+  - tools: ["Read"]
+    when: 'tool_input.file_path.matches("id_rsa$")'
+    action: deny
+    reason: "reading SSH private keys is not allowed"

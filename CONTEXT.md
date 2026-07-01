@@ -1,4 +1,4 @@
-# ctool-gate
+# hookguard
 
 A Claude Code `PreToolUse` security gate: every tool call (Bash commands,
 file reads/writes, …) is evaluated against a declarative policy before
@@ -51,7 +51,7 @@ _Avoid_: Escape hatch, unsafe command
 
 ## Relationships
 
-- A **Policy** (the loaded `gate.yaml`) contains an ordered list of **Rules**.
+- A **Policy** (the loaded `hookguard.yaml`) contains an ordered list of **Rules**.
 - A **Rule** is evaluated against exactly one tool call and yields at most
   one action if it matches; a **Rule**'s condition is either **Sugar
   fields** or a **When-expression** (or both).
@@ -78,6 +78,6 @@ _Avoid_: Escape hatch, unsafe command
 
 ## Flagged ambiguities
 
-- "Policy" was used for both the whole `gate.yaml` file and a single entry
+- "Policy" was used for both the whole `hookguard.yaml` file and a single entry
   in it — resolved: the whole file is the **Policy**, a single entry in its
   `rules:` list is a **Rule**.

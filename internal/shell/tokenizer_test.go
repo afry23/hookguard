@@ -3,7 +3,7 @@ package shell_test
 import (
 	"testing"
 
-	"ctool-gate/internal/shell"
+	"hookguard/internal/shell"
 )
 
 // ─── helpers ────────────────────────────────────────────────────────────────

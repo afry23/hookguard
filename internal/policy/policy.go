@@ -1,17 +1,18 @@
-// Package policy loads a YAML gate configuration and evaluates parsed shell
-// segments against it, returning allow / deny / ask decisions.
+// Package policy loads a YAML hookguard configuration and evaluates tool
+// calls against a CEL-based rules list, returning allow / deny / ask
+// decisions.
 package policy
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
+	"github.com/google/cel-go/cel"
 	"gopkg.in/yaml.v3"
 
-	"ctool-gate/internal/shell"
+	"hookguard/internal/shell"
 )
 
 // ─── action type ─────────────────────────────────────────────────────────────
@@ -26,7 +27,7 @@ const (
 )
 
 // Severity returns a numeric rank for an action so we can pick the most
-// restrictive outcome across multiple segments in one command.
+// restrictive outcome across multiple matching rules (or segments).
 //
 //	deny(2) > ask(1) > allow(0)
 func Severity(a Action) int {
@@ -44,34 +45,50 @@ func Severity(a Action) int {
 
 // ─── YAML schema ─────────────────────────────────────────────────────────────
 
-// SubcommandPolicy defines rules for a single subcommand (or the wildcard "*").
-type SubcommandPolicy struct {
-	// Action is the base decision for this subcommand.
-	// Falls back to the parent ToolPolicy.DefaultAction when empty.
+// Rule is a single entry in the policy's rules list. It matches a tool call
+// via sugar fields, a raw when-expression, or both (ANDed together), and
+// resolves to Action if it matches.
+type Rule struct {
+	// Bash sugar (exclusive with Tools/Path).
+	Tool       string   `yaml:"tool"`
+	Subcommand string   `yaml:"subcommand"`
+	DenyFlags  []string `yaml:"deny_flags"`
+
+	// Path sugar (Read/Edit/Write).
+	Tools []string `yaml:"tools"`
+	Path  string   `yaml:"path"`
+
+	// Raw CEL, ANDed with any sugar expression present.
+	When string `yaml:"when"`
+
 	Action Action `yaml:"action"`
+	Reason string `yaml:"reason"`
 
-	// DenyFlags lists flags that must never appear.
-	// Values are matched after flag expansion and alias normalisation, so you
-	// only need the canonical long form here (e.g. "--force", not both "-f" and
-	// "--force" when a flag_alias mapping exists).
-	DenyFlags []string `yaml:"deny_flags"`
-
-	// DenyArgsRegex lists regular expressions matched against positional
-	// arguments (not flags).  A match causes a deny decision.
-	DenyArgsRegex []string `yaml:"deny_args_regex"`
-
-	// compiled regexes — populated by Load(), not from YAML.
-	denyArgsRe []*regexp.Regexp
+	// set by Load(), not from YAML.
+	program    cel.Program
+	scopeTools map[string]bool // nil = evaluate for every tool_name
 }
 
-// ToolPolicy defines rules for a top-level CLI tool.
-type ToolPolicy struct {
-	// DefaultAction is the fallback action when no subcommand policy matches.
+// Policy is the root configuration object loaded from hookguard.yaml.
+type Policy struct {
+	Version  int    `yaml:"version"`
+	AuditLog string `yaml:"audit_log"`
+
+	// DefaultAction is the fallback when no rule matches a tool call.
+	// Defaults to "deny" (secure default) when empty.
 	DefaultAction Action `yaml:"default_action"`
 
-	// Subcommands maps subcommand names to their policies.
-	// Use "*" as a catch-all for any subcommand not listed explicitly.
-	Subcommands map[string]*SubcommandPolicy `yaml:"subcommands"`
+	// Rules is the unified list of rules evaluated for every tool call.
+	Rules []Rule `yaml:"rules"`
+
+	// OpaqueGuard controls the decision when a Bash command contains a
+	// construct that cannot be safely decomposed into segments.
+	// Defaults to "ask" when empty.
+	OpaqueGuard OpaqueGuard `yaml:"opaque_execution_guard"`
+
+	// PowerShellAction is the blanket decision for PowerShell tool calls
+	// (no parsing performed). Defaults to "ask" when empty.
+	PowerShellAction Action `yaml:"powershell_action"`
 }
 
 // OpaqueGuard controls what happens when an opaque execution construct is
@@ -80,39 +97,19 @@ type OpaqueGuard struct {
 	Action Action `yaml:"action"`
 }
 
-// Policy is the root configuration object loaded from gate.yaml.
-type Policy struct {
-	Version int    `yaml:"version"`
-	AuditLog string `yaml:"audit_log"`
+// ─── Activation / EvalResult ─────────────────────────────────────────────────
 
-	// DefaultAction is the fallback when a tool is not listed in Tools.
-	// Defaults to "deny" (secure default) when empty.
-	DefaultAction Action `yaml:"default_action"`
-
-	// FlagAliases maps  tool → subcommand → short_flag → canonical_flag.
-	// Applied before deny_flags matching so you can write deny rules using the
-	// long form only.
-	//
-	// Example:
-	//   flag_aliases:
-	//     git:
-	//       push:
-	//         "-f": "--force"
-	//       commit:
-	//         "-n": "--no-verify"
-	FlagAliases map[string]map[string]map[string]string `yaml:"flag_aliases"`
-
-	// Tools lists tool-specific policies.
-	Tools map[string]*ToolPolicy `yaml:"tools"`
-
-	// OpaqueGuard controls the decision for opaque constructs.
-	// Defaults to "ask" when empty.
-	OpaqueGuard OpaqueGuard `yaml:"opaque_execution_guard"`
+// Activation carries the variables available to rule evaluation for exactly
+// one tool call (or one Bash segment within a tool call).
+type Activation struct {
+	ToolName  string
+	ToolInput map[string]any
+	Cwd       string
+	SessionID string
+	Segment   *shell.Segment // nil for non-Bash tool calls
 }
 
-// ─── EvalResult ──────────────────────────────────────────────────────────────
-
-// EvalResult is the outcome of evaluating one segment.
+// EvalResult is the outcome of evaluating one Activation.
 type EvalResult struct {
 	Action Action
 	Reason string // human-readable reason, fed back to Claude on deny/ask
@@ -142,18 +139,18 @@ func Load(path string) (*Policy, error) {
 	if p.OpaqueGuard.Action == "" {
 		p.OpaqueGuard.Action = ActionAsk
 	}
+	if p.PowerShellAction == "" {
+		p.PowerShellAction = ActionAsk
+	}
 
-	// Compile deny_args_regex patterns.
-	for toolName, tp := range p.Tools {
-		for subName, sp := range tp.Subcommands {
-			for _, pattern := range sp.DenyArgsRegex {
-				re, err := regexp.Compile(pattern)
-				if err != nil {
-					return nil, fmt.Errorf("tool %q subcommand %q: invalid deny_args_regex %q: %w",
-						toolName, subName, pattern, err)
-				}
-				sp.denyArgsRe = append(sp.denyArgsRe, re)
-			}
+	env, err := newCELEnv()
+	if err != nil {
+		return nil, fmt.Errorf("building CEL environment: %w", err)
+	}
+
+	for i := range p.Rules {
+		if err := compileRule(&p.Rules[i], env); err != nil {
+			return nil, fmt.Errorf("rule %d: %w", i, err)
 		}
 	}
 
@@ -162,111 +159,103 @@ func Load(path string) (*Policy, error) {
 
 // ─── Evaluate ────────────────────────────────────────────────────────────────
 
-// Evaluate applies the policy to a single parsed segment and returns a decision.
-//
-// Evaluation order:
-//  1. Tool must be in the Tools map; otherwise DefaultAction applies.
-//  2. Flags are normalised via FlagAliases for this tool+subcommand.
-//  3. The most specific SubcommandPolicy is selected (exact match → "*" → none).
-//  4. deny_flags are checked.
-//  5. deny_args_regex are checked against positional arguments.
-//  6. The subcommand / tool / global action is returned.
-func (p *Policy) Evaluate(seg shell.Segment) EvalResult {
-	toolPolicy, ok := p.Tools[seg.Tool]
-	if !ok {
+// Evaluate applies every rule to a single Activation and returns the most
+// severe matching decision (deny > ask > allow), or the policy's
+// DefaultAction if no rule matches.
+func (p *Policy) Evaluate(a Activation) EvalResult {
+	best := EvalResult{}
+	bestSeverity := -1
+
+	segMap := segmentToMap(a.Segment)
+
+	for i := range p.Rules {
+		r := &p.Rules[i]
+
+		if r.scopeTools != nil && !r.scopeTools[a.ToolName] {
+			continue
+		}
+
+		vars := map[string]any{
+			"tool_name":  a.ToolName,
+			"tool_input": toolInputToMap(a.ToolInput),
+			"segment":    segMap,
+			"cwd":        a.Cwd,
+			"session_id": a.SessionID,
+		}
+
+		out, _, err := r.program.Eval(vars)
+		if err != nil {
+			// Runtime error: this rule counts as matched with action "ask" so
+			// it participates in severity resolution instead of being
+			// silently dropped (a deny elsewhere still wins).
+			if Severity(ActionAsk) > bestSeverity {
+				best = EvalResult{
+					Action: ActionAsk,
+					Reason: fmt.Sprintf("rule %d: CEL evaluation error: %v", i, err),
+				}
+				bestSeverity = Severity(ActionAsk)
+			}
+			continue
+		}
+
+		matched, ok := out.Value().(bool)
+		if !ok || !matched {
+			continue
+		}
+
+		sev := Severity(r.Action)
+		if sev > bestSeverity {
+			reason := r.Reason
+			if reason == "" {
+				reason = fmt.Sprintf("rule %d matched (action=%s)", i, r.Action)
+			}
+			best = EvalResult{Action: r.Action, Reason: reason}
+			bestSeverity = sev
+		}
+	}
+
+	if bestSeverity == -1 {
 		return EvalResult{
 			Action: p.DefaultAction,
-			Reason: fmt.Sprintf("tool %q is not listed in policy (default_action=%s)", seg.Tool, p.DefaultAction),
+			Reason: fmt.Sprintf("no rule matched (default_action=%s)", p.DefaultAction),
 		}
 	}
 
-	// Normalise flags via alias table before matching.
-	flags := p.normaliseFlags(seg.Tool, seg.Subcommand, seg.Flags)
-
-	// Resolve the most specific subcommand policy.
-	subPolicy := toolPolicy.Subcommands[seg.Subcommand]
-	if subPolicy == nil {
-		subPolicy = toolPolicy.Subcommands["*"]
-	}
-
-	if subPolicy == nil {
-		// No subcommand policy found; use tool default.
-		action := coalesce(toolPolicy.DefaultAction, p.DefaultAction)
-		return EvalResult{
-			Action: action,
-			Reason: fmt.Sprintf("no subcommand policy for `%s %s` (tool default=%s)", seg.Tool, seg.Subcommand, action),
-		}
-	}
-
-	// 1. Check deny_flags.
-	for _, flag := range flags {
-		for _, denied := range subPolicy.DenyFlags {
-			if flag == denied {
-				return EvalResult{
-					Action: ActionDeny,
-					Reason: fmt.Sprintf("flag %q is denied for `%s %s`", flag, seg.Tool, seg.Subcommand),
-				}
-			}
-		}
-	}
-
-	// 2. Check deny_args_regex against positional arguments.
-	for _, arg := range seg.Args {
-		for _, re := range subPolicy.denyArgsRe {
-			if re.MatchString(arg) {
-				return EvalResult{
-					Action: ActionDeny,
-					Reason: fmt.Sprintf("argument %q matches denied pattern /%s/ for `%s %s`",
-						arg, re.String(), seg.Tool, seg.Subcommand),
-				}
-			}
-		}
-	}
-
-	// 3. Return the resolved action.
-	action := coalesce(subPolicy.Action, toolPolicy.DefaultAction, p.DefaultAction)
-	return EvalResult{Action: action}
+	return best
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-// normaliseFlags applies flag_aliases for the given tool+subcommand, mapping
-// short flags to their canonical long form.
-func (p *Policy) normaliseFlags(tool, subcommand string, flags []string) []string {
-	aliases := p.aliasMap(tool, subcommand)
-	if len(aliases) == 0 {
-		return flags
+func toolInputToMap(m map[string]any) map[string]any {
+	if m == nil {
+		return map[string]any{}
 	}
-	result := make([]string, len(flags))
-	for i, f := range flags {
-		if canonical, ok := aliases[f]; ok {
-			result[i] = canonical
-		} else {
-			result[i] = f
-		}
-	}
-	return result
+	return m
 }
 
-func (p *Policy) aliasMap(tool, subcommand string) map[string]string {
-	if p.FlagAliases == nil {
-		return nil
-	}
-	subMap, ok := p.FlagAliases[tool]
-	if !ok {
-		return nil
-	}
-	return subMap[subcommand]
-}
-
-// coalesce returns the first non-empty Action from the list.
-func coalesce(actions ...Action) Action {
-	for _, a := range actions {
-		if a != "" {
-			return a
+func segmentToMap(s *shell.Segment) map[string]any {
+	if s == nil {
+		return map[string]any{
+			"tool":       "",
+			"subcommand": "",
+			"flags":      []string{},
+			"args":       []string{},
 		}
 	}
-	return ActionDeny
+	return map[string]any{
+		"tool":       s.Tool,
+		"subcommand": s.Subcommand,
+		"flags":      toAnySlice(s.Flags),
+		"args":       toAnySlice(s.Args),
+	}
+}
+
+func toAnySlice(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
 }
 
 func expandHome(path string) string {

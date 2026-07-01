@@ -1,19 +1,20 @@
-# ctool-gate
+# hookguard
 
-A YAML-driven security gateway for Claude Code's `PreToolUse` hook.  
-Every Bash command Claude attempts to run is evaluated against a declarative
-policy before execution.
+A CEL-driven security gateway for Claude Code's `PreToolUse` hook.
+Every tool call Claude attempts to make — Bash commands, file reads/writes,
+and more — is evaluated against a declarative policy before execution.
 
 ```
-Claude Code (PreToolUse: Bash)
+Claude Code (PreToolUse: Bash / Read / Edit / Write / …)
         │  JSON via stdin
         ▼
-  ┌─────────────────────────────┐
-  │  ctool-gate  (Go binary)    │
-  │  1. Shell-aware tokeniser   │  ← mvdan.cc/sh/v3 (not regex)
-  │  2. Segment → policy match  │  ← gate.yaml
-  │  3. Audit log (JSONL)       │
-  └─────────────────────────────┘
+  ┌───────────────────────────────┐
+  │  hookguard  (Go binary)       │
+  │  1. Shell-aware tokeniser     │  ← mvdan.cc/sh/v3 (not regex, Bash only)
+  │  2. Rules compiled to CEL     │  ← hookguard.yaml, cel-go
+  │  3. Severity-based resolution │  ← deny > ask > allow
+  │  4. Audit log (JSONL)         │
+  └───────────────────────────────┘
         │  JSON via stdout
         ▼
   permissionDecision: allow | deny | ask
@@ -21,12 +22,15 @@ Claude Code (PreToolUse: Bash)
 
 **Key properties**
 
+- A single `rules:` list, evaluated with [CEL](https://github.com/google/cel-go),
+  covers Bash segments *and* generic `tool_input` fields for Read/Edit/Write
+  and any other tool.
 - Shell-correct parsing via `mvdan.cc/sh/v3` — respects quoting, pipelines,
   `&&`/`||`/`;`, and reliably detects opaque constructs (`eval`, `sh -c`,
   `$(…)`, `xargs`, …).
 - Combined short flags are expanded (`-rf` → `-r`, `-f`) before matching.
-- Flag alias tables map short → long form so deny rules only need the
-  canonical form.
+- When several rules match the same tool call, the most **severe** action
+  wins (`deny > ask > allow`) — not the rule that appears first in the file.
 - `deny` decisions from this hook survive `--dangerously-skip-permissions`
   and `bypassPermissions` mode (Claude Code PreToolUse guarantee).
 - Single static binary; no interpreter runtime needed on developer machines.
@@ -35,18 +39,18 @@ Claude Code (PreToolUse: Bash)
 
 ## Build & install
 
-**Prerequisites:** Go 1.22+
+**Prerequisites:** Go 1.23+
 
 ```bash
-git clone https://github.com/yourorg/ctool-gate
-cd ctool-gate
+git clone https://github.com/yourorg/hookguard
+cd hookguard
 
-make install          # builds + installs to /usr/local/bin/ctool-gate
+make install          # builds + installs to /usr/local/bin/hookguard
 # or
-make PREFIX=~/.local install   # install to ~/.local/bin/ctool-gate
+make PREFIX=~/.local install   # install to ~/.local/bin/hookguard
 ```
 
-`make build` produces a `./ctool-gate` binary in the project root without
+`make build` produces a `./hookguard` binary in the project root without
 installing.
 
 ---
@@ -56,50 +60,97 @@ installing.
 Copy the example policy to the default location:
 
 ```bash
-cp config/gate.yaml ~/.claude/gate.yaml
+cp config/hookguard.yaml ~/.claude/hookguard.yaml
 ```
 
-Edit `~/.claude/gate.yaml` to match your team's requirements.  
-The full schema is documented in the file itself.
+Edit `~/.claude/hookguard.yaml` to match your team's requirements.
 
-### Quick reference
+### Schema reference
 
 ```yaml
 version: 1
-default_action: deny          # unknown tools are blocked
-audit_log: ~/.claude/gate-audit.jsonl
-
-flag_aliases:
-  git:
-    push:  { "-f": "--force" }
-    commit: { "-n": "--no-verify" }
+default_action: deny          # fallback when no rule matches
+audit_log: ~/.claude/hookguard-audit.jsonl
 
 opaque_execution_guard:
-  action: ask                 # eval / sh -c / $(...) → ask user
+  action: ask                  # eval / sh -c / $(...) → ask user
 
-tools:
-  git:
-    default_action: allow
-    subcommands:
-      push:
-        deny_flags: ["--force", "--force-with-lease"]
-      commit:
-        deny_flags: ["--no-verify"]
-      config:
-        action: ask
-        deny_args_regex: ['core\.hooksPath', '^--global$']
-      "*":
-        action: allow
-  rm:
-    default_action: ask
+powershell_action: ask         # blanket decision for PowerShell calls (no parsing)
+
+rules:
+  # Bash sugar: tool / subcommand / deny_flags compile to a CEL expression
+  # matching Bash segments.
+  - tool: git
+    subcommand: push
+    deny_flags: ["--force", "--force-with-lease", "-f"]
+    action: deny
+    reason: "force-push rewrites remote history"
+
+  # Path sugar: tools / path compile to a CEL expression matching
+  # tool_input.file_path for the listed tools.
+  - tools: ["Read"]
+    path: "**/.env*"
+    action: deny
+    reason: "reading .env files may leak secrets"
+
+  # Raw `when:` — a CEL boolean expression, used when sugar isn't expressive
+  # enough. ANDed with any sugar fields present on the same rule.
+  - tools: ["Read"]
+    when: 'tool_input.file_path.matches("id_rsa$")'
+    action: deny
+    reason: "reading SSH private keys is not allowed"
 ```
+
+Each rule matches via **sugar fields** or a raw `when:` expression (or both,
+ANDed together), and resolves to `action` if it matches. A tool call may
+match several rules; the most severe `action` wins, regardless of rule order
+(`deny(2) > ask(1) > allow(0)`).
+
+#### Sugar fields
+
+| Field | Applies to | Description |
+|---|---|---|
+| `tool` | Bash | Primary executable, e.g. `"git"` |
+| `subcommand` | Bash | First non-flag argument, e.g. `"push"` |
+| `deny_flags` | Bash | Match if any of these flags is present (list both short and long forms explicitly — there is no flag-alias table) |
+| `tools` | any tool | List of `tool_name` values this rule applies to, e.g. `["Read", "Edit"]` |
+| `path` | Read/Edit/Write | Glob pattern matched against `tool_input.file_path` |
+| `when` | any | Raw CEL boolean expression |
+
+A rule must set exactly one of `tool` or `tools` (or rely solely on `when`),
+and must have at least one condition (sugar and/or `when`).
+
+#### CEL variable table
+
+Available to every `when:` expression and every sugar compilation:
+
+| Name | CEL type | Source | Notes |
+|---|---|---|---|
+| `tool_name` | `string` | `tool_name` from the hook payload | e.g. `"Bash"`, `"Read"` |
+| `tool_input` | `dyn` (map) | decoded `tool_input` JSON object | generic, e.g. `{"file_path": "..."}` |
+| `segment` | `dyn` (map) | current Bash segment (Bash only) | `{tool, subcommand, flags, args}`; zero-value map for non-Bash calls (`tool:"", subcommand:"", flags:[], args:[]`), never missing/null |
+| `cwd` | `string` | `cwd` from the hook payload | |
+| `session_id` | `string` | `session_id` from the hook payload | |
+
+#### `glob(path, pattern)`
+
+Custom CEL function backed by `github.com/bmatcuk/doublestar/v4`, e.g.
+`glob(tool_input.file_path, "**/.env*")`. Argument order is `(path,
+pattern)`.
+
+A CEL **runtime error** in a rule (e.g. accessing a field absent for the
+current tool) escalates that rule to action `ask` — it still participates in
+severity resolution (so a `deny` elsewhere still wins), but the error can
+never silently resolve to `allow`. Compile-time errors (bad CEL syntax,
+malformed glob patterns, invalid sugar-field combinations) fail `Load()`
+immediately.
 
 ### Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `CTOOL_GATE_POLICY` | `~/.claude/gate.yaml` | Override policy file path |
-| `CTOOL_GATE_FAIL_MODE` | `ask` | Decision when policy file is missing (`allow`/`deny`/`ask`) |
+| `HOOKGUARD_POLICY` | `~/.claude/hookguard.yaml` | Override policy file path |
+| `HOOKGUARD_FAIL_MODE` | `ask` | Decision when policy file is missing (`allow`/`deny`/`ask`) |
 
 ---
 
@@ -117,7 +168,7 @@ Add to `~/.claude/settings.json` (personal) or `.claude/settings.json`
         "hooks": [
           {
             "type": "command",
-            "command": "ctool-gate"
+            "command": "hookguard"
           }
         ]
       }
@@ -129,13 +180,13 @@ Add to `~/.claude/settings.json` (personal) or `.claude/settings.json`
 If you installed the binary to a non-standard path, use the full path:
 
 ```json
-"command": "/usr/local/bin/ctool-gate"
+"command": "/usr/local/bin/hookguard"
 ```
 
 To pass a custom policy file:
 
 ```json
-"command": "CTOOL_GATE_POLICY=/etc/claude-code/gate.yaml ctool-gate"
+"command": "HOOKGUARD_POLICY=/etc/claude-code/hookguard.yaml hookguard"
 ```
 
 ### Enterprise / team deployment
@@ -156,7 +207,7 @@ user or project settings:
         "hooks": [
           {
             "type": "command",
-            "command": "CTOOL_GATE_POLICY=/etc/claude-code/gate.yaml /usr/local/bin/ctool-gate"
+            "command": "HOOKGUARD_POLICY=/etc/claude-code/hookguard.yaml /usr/local/bin/hookguard"
           }
         ]
       }
@@ -172,18 +223,20 @@ user or project settings:
 Every tool call is appended to the file configured in `audit_log` as JSONL:
 
 ```jsonl
-{"ts":"2026-07-01T10:00:00Z","session_id":"abc123","cwd":"/app","cmd":"git push --force origin main","action":"deny","reason":"flag \"--force\" is denied for `git push`"}
-{"ts":"2026-07-01T10:00:05Z","session_id":"abc123","cwd":"/app","cmd":"git status","action":"allow"}
+{"ts":"2026-07-01T10:00:00Z","session_id":"abc123","cwd":"/app","tool_name":"Bash","cmd":"git push --force origin main","action":"deny","reason":"force-push rewrites remote history"}
+{"ts":"2026-07-01T10:00:05Z","session_id":"abc123","cwd":"/app","tool_name":"Read","action":"deny","reason":"reading .env files may leak secrets"}
 ```
+
+`cmd` is only populated for Bash tool calls.
 
 Parse with `jq`:
 
 ```bash
-# All denied commands today
-jq 'select(.action=="deny")' ~/.claude/gate-audit.jsonl
+# All denied calls today
+jq 'select(.action=="deny")' ~/.claude/hookguard-audit.jsonl
 
 # Summary by action
-jq -r '.action' ~/.claude/gate-audit.jsonl | sort | uniq -c
+jq -r '.action' ~/.claude/hookguard-audit.jsonl | sort | uniq -c
 ```
 
 ---
@@ -197,18 +250,28 @@ same rules as a `pre-push` git hook to cover manual CLI use as well:
 # .git/hooks/pre-push  (or via git config core.hooksPath)
 #!/usr/bin/env bash
 while read local_ref local_sha remote_ref remote_sha; do
-  # Reconstruct the push command and pipe through ctool-gate
+  # Reconstruct the push command and pipe through hookguard
   cmd="git push origin $remote_ref"
   echo "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$cmd\"}}" \
-    | ctool-gate > /tmp/gate-result.json
-  decision=$(jq -r '.hookSpecificOutput.permissionDecision' /tmp/gate-result.json)
-  reason=$(jq -r '.hookSpecificOutput.permissionDecisionReason // ""' /tmp/gate-result.json)
+    | hookguard > /tmp/hookguard-result.json
+  decision=$(jq -r '.hookSpecificOutput.permissionDecision' /tmp/hookguard-result.json)
+  reason=$(jq -r '.hookSpecificOutput.permissionDecisionReason // ""' /tmp/hookguard-result.json)
   if [ "$decision" = "deny" ]; then
-    echo "ctool-gate: push blocked — $reason" >&2
+    echo "hookguard: push blocked — $reason" >&2
     exit 1
   fi
 done
 ```
+
+---
+
+## Breaking change: no migration path
+
+The unified CEL-based `rules:` schema replaces the previous `tools:` tree
+(`deny_flags`/`deny_args_regex`/`flag_aliases` nested per tool/subcommand)
+outright. There is no automatic migration — hookguard has no prior
+users/configurations to migrate. If you need the old schema, check out a
+Git tag prior to this change.
 
 ---
 
@@ -220,17 +283,23 @@ make lint     # requires golangci-lint
 
 # Manually test the hook by piping example Claude Code JSON:
 echo '{"tool_name":"Bash","tool_input":{"command":"git push --force origin main"}}' \
-  | CTOOL_GATE_POLICY=config/gate.yaml ./ctool-gate | jq .
+  | HOOKGUARD_POLICY=config/hookguard.yaml ./hookguard | jq .
+
+echo '{"tool_name":"Read","tool_input":{"file_path":"/app/.env"}}' \
+  | HOOKGUARD_POLICY=config/hookguard.yaml ./hookguard | jq .
+
+echo '{"tool_name":"PowerShell","tool_input":{"command":"Remove-Item -Recurse -Force C:\\"}}' \
+  | HOOKGUARD_POLICY=config/hookguard.yaml ./hookguard | jq .
 ```
 
-Expected output for the above:
+Expected output for the first command:
 
 ```json
 {
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "permissionDecision": "deny",
-    "permissionDecisionReason": "flag \"--force\" is denied for `git push`"
+    "permissionDecisionReason": "force-push rewrites remote history and bypasses branch protections"
   }
 }
 ```
@@ -240,19 +309,21 @@ Expected output for the above:
 ## Project structure
 
 ```
-ctool-gate/
-├── cmd/ctool-gate/main.go          # entry point: stdin→decision→stdout
+hookguard/
+├── cmd/hookguard/main.go            # entry point: stdin→decision→stdout
 ├── internal/
 │   ├── shell/
 │   │   ├── tokenizer.go            # shell-aware command parser
 │   │   └── tokenizer_test.go
 │   ├── policy/
-│   │   ├── policy.go               # YAML policy loader + evaluator
+│   │   ├── policy.go               # Rule/Policy types, Load, Evaluate
+│   │   ├── cel_env.go              # CEL environment + glob() function
+│   │   ├── sugar.go                # sugar-field validation + CEL compilation
 │   │   └── policy_test.go
 │   └── audit/
 │       └── audit.go                # append-only JSONL logger
 ├── config/
-│   └── gate.yaml                   # example policy (copy to ~/.claude/)
+│   └── hookguard.yaml              # example policy (copy to ~/.claude/)
 ├── Makefile
 └── README.md
 ```

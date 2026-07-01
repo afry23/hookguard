@@ -1,4 +1,4 @@
-BIN     := ctool-gate
+BIN     := hookguard
 PREFIX  ?= /usr/local
 DESTDIR ?=
 GOFLAGS := -ldflags="-s -w"
@@ -13,7 +13,7 @@ deps:
 
 ## build: compile the binary (runs deps first)
 build: deps
-	go build $(GOFLAGS) -o $(BIN) ./cmd/ctool-gate
+	go build $(GOFLAGS) -o $(BIN) ./cmd/hookguard
 
 ## install: install to $(DESTDIR)$(PREFIX)/bin  (default: /usr/local/bin)
 install: build
