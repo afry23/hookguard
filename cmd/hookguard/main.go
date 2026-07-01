@@ -21,6 +21,7 @@ import (
 
 	"hookguard/internal/audit"
 	"hookguard/internal/policy"
+	"hookguard/internal/powershell"
 	"hookguard/internal/shell"
 )
 
@@ -84,7 +85,7 @@ func main() {
 			Action:    string(action),
 			Reason:    reason,
 		}
-		if input.ToolName == "Bash" {
+		if input.ToolName == "Bash" || input.ToolName == "PowerShell" {
 			entry.Command, _ = input.ToolInput["command"].(string)
 		}
 		_ = audit.Write(pol.AuditLog, entry)
@@ -98,7 +99,35 @@ func main() {
 // invocation, independent of stdin/stdout, so it can be unit-tested directly.
 func decide(input hookInput, pol *policy.Policy) (policy.Action, string) {
 	if input.ToolName == "PowerShell" {
-		return pol.PowerShellAction, "PowerShell calls are not parsed (powershell_action)"
+		cmdStr, _ := input.ToolInput["command"].(string)
+		parseResult, _ := powershell.Parse(cmdStr)
+
+		switch {
+		case parseResult.HasOpaqueExec:
+			return pol.PowerShellOpaqueGuard.Action, "PowerShell opaque execution detected: " + parseResult.OpaqueReason
+
+		case len(parseResult.Segments) == 0:
+			return policy.ActionAllow, ""
+
+		default:
+			action := policy.ActionAllow
+			reason := ""
+			for _, seg := range parseResult.Segments {
+				seg := seg
+				result := pol.Evaluate(policy.Activation{
+					ToolName:  input.ToolName,
+					ToolInput: input.ToolInput,
+					Cwd:       input.Cwd,
+					SessionID: input.SessionID,
+					PSSegment: &seg,
+				})
+				if policy.Severity(result.Action) > policy.Severity(action) {
+					action = result.Action
+					reason = result.Reason
+				}
+			}
+			return action, reason
+		}
 	}
 
 	if input.ToolName != "Bash" {

@@ -14,6 +14,7 @@ func newCELEnv() (*cel.Env, error) {
 		cel.Variable("tool_name", cel.StringType),
 		cel.Variable("tool_input", cel.DynType),
 		cel.Variable("segment", cel.DynType),
+		cel.Variable("ps_segment", cel.DynType),
 		cel.Variable("cwd", cel.StringType),
 		cel.Variable("session_id", cel.StringType),
 

@@ -28,6 +28,17 @@ func compileRule(r *Rule, env *cel.Env) error {
 		}
 	}
 
+	if r.Cmdlet != "" {
+		parts = append(parts, fmt.Sprintf(`tool_name == "PowerShell" && ps_segment.cmdlet == %q`, r.Cmdlet))
+		if len(r.DenyFlags) > 0 {
+			list := quotedList(r.DenyFlags)
+			parts = append(parts, fmt.Sprintf(
+				`(ps_segment.parameters.exists(k, k in %s) || ps_segment.switches.exists(f, f in %s))`,
+				list, list,
+			))
+		}
+	}
+
 	if len(r.Tools) > 0 {
 		parts = append(parts, fmt.Sprintf(`tool_name in %s`, quotedList(r.Tools)))
 		if r.Path != "" {
@@ -65,14 +76,23 @@ func validateRule(r *Rule) error {
 	if r.Tool != "" && len(r.Tools) > 0 {
 		return fmt.Errorf("rule has both `tool` and `tools` set")
 	}
-	if (r.Subcommand != "" || len(r.DenyFlags) > 0) && r.Tool == "" {
-		return fmt.Errorf("rule sets `subcommand`/`deny_flags` without `tool`")
+	if r.Tool != "" && r.Cmdlet != "" {
+		return fmt.Errorf("rule has both `tool` and `cmdlet` set")
+	}
+	if r.Cmdlet != "" && len(r.Tools) > 0 {
+		return fmt.Errorf("rule has both `cmdlet` and `tools` set")
+	}
+	if r.Subcommand != "" && r.Tool == "" {
+		return fmt.Errorf("rule sets `subcommand` without `tool`")
+	}
+	if len(r.DenyFlags) > 0 && r.Tool == "" && r.Cmdlet == "" {
+		return fmt.Errorf("rule sets `deny_flags` without `tool` or `cmdlet`")
 	}
 	if r.Path != "" && len(r.Tools) == 0 {
 		return fmt.Errorf("rule sets `path` without `tools`")
 	}
-	if r.Tool == "" && len(r.Tools) == 0 && r.When == "" {
-		return fmt.Errorf("rule has no condition (no `tool`, `tools`, or `when`)")
+	if r.Tool == "" && r.Cmdlet == "" && len(r.Tools) == 0 && r.When == "" {
+		return fmt.Errorf("rule has no condition (no `tool`, `cmdlet`, `tools`, or `when`)")
 	}
 	return nil
 }
@@ -85,6 +105,8 @@ func scopeToolsFor(r *Rule) map[string]bool {
 	switch {
 	case r.Tool != "":
 		return map[string]bool{"Bash": true}
+	case r.Cmdlet != "":
+		return map[string]bool{"PowerShell": true}
 	case len(r.Tools) > 0:
 		set := make(map[string]bool, len(r.Tools))
 		for _, t := range r.Tools {

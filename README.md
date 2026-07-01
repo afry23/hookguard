@@ -5,12 +5,12 @@ Every tool call Claude attempts to make — Bash commands, file reads/writes,
 and more — is evaluated against a declarative policy before execution.
 
 ```
-Claude Code (PreToolUse: Bash / Read / Edit / Write / …)
+Claude Code (PreToolUse: Bash / PowerShell / Read / Edit / Write / …)
         │  JSON via stdin
         ▼
   ┌───────────────────────────────┐
   │  hookguard  (Go binary)       │
-  │  1. Shell-aware tokeniser     │  ← mvdan.cc/sh/v3 (not regex, Bash only)
+  │  1. Shell-aware tokeniser     │  ← mvdan.cc/sh/v3 (Bash) or internal/powershell (PowerShell 7+)
   │  2. Rules compiled to CEL     │  ← hookguard.yaml, cel-go
   │  3. Severity-based resolution │  ← deny > ask > allow
   │  4. Audit log (JSONL)         │
@@ -23,11 +23,17 @@ Claude Code (PreToolUse: Bash / Read / Edit / Write / …)
 **Key properties**
 
 - A single `rules:` list, evaluated with [CEL](https://github.com/google/cel-go),
-  covers Bash segments *and* generic `tool_input` fields for Read/Edit/Write
-  and any other tool.
-- Shell-correct parsing via `mvdan.cc/sh/v3` — respects quoting, pipelines,
-  `&&`/`||`/`;`, and reliably detects opaque constructs (`eval`, `sh -c`,
-  `$(…)`, `xargs`, …).
+  covers Bash segments, PowerShell segments, *and* generic `tool_input`
+  fields for Read/Edit/Write and any other tool.
+- Shell-correct parsing via `mvdan.cc/sh/v3` for Bash — respects quoting,
+  pipelines, `&&`/`||`/`;`, and reliably detects opaque constructs (`eval`,
+  `sh -c`, `$(…)`, `xargs`, …).
+- PowerShell 7+ is parsed by a dedicated hand-written tokenizer
+  (`internal/powershell`, no maintained Go library exists for this — see
+  [ADR 0005](docs/adr/0005-hand-written-powershell-tokenizer.md)), resolving
+  built-in aliases (`rm`/`ri` → `Remove-Item`, …) and reliably detecting
+  opaque constructs (`Invoke-Expression`, dot-sourcing, dynamic `&`
+  call-operator targets, `-EncodedCommand`, `Add-Type`, control structures).
 - Combined short flags are expanded (`-rf` → `-r`, `-f`) before matching.
 - When several rules match the same tool call, the most **severe** action
   wins (`deny > ask > allow`) — not the rule that appears first in the file.
@@ -75,7 +81,8 @@ audit_log: ~/.claude/hookguard-audit.jsonl
 opaque_execution_guard:
   action: ask                  # eval / sh -c / $(...) → ask user
 
-powershell_action: ask         # blanket decision for PowerShell calls (no parsing)
+powershell_opaque_execution_guard:
+  action: ask                  # Invoke-Expression / dot-sourcing / etc. → ask user
 
 rules:
   # Bash sugar: tool / subcommand / deny_flags compile to a CEL expression
@@ -85,6 +92,13 @@ rules:
     deny_flags: ["--force", "--force-with-lease", "-f"]
     action: deny
     reason: "force-push rewrites remote history"
+
+  # PowerShell sugar: cmdlet / deny_flags compile to a CEL expression matching
+  # PowerShell segments. Built-in aliases (rm/ri → Remove-Item, etc.) are
+  # resolved to the canonical cmdlet name before matching.
+  - cmdlet: Remove-Item
+    action: ask
+    reason: "always require confirmation for Remove-Item"
 
   # Path sugar: tools / path compile to a CEL expression matching
   # tool_input.file_path for the listed tools.
@@ -112,13 +126,14 @@ match several rules; the most severe `action` wins, regardless of rule order
 |---|---|---|
 | `tool` | Bash | Primary executable, e.g. `"git"` |
 | `subcommand` | Bash | First non-flag argument, e.g. `"push"` |
-| `deny_flags` | Bash | Match if any of these flags is present (list both short and long forms explicitly — there is no flag-alias table) |
+| `deny_flags` | Bash or PowerShell | Bash: match if any of these flags is present. PowerShell (with `cmdlet`): match if any of these parameter or switch **names** is present, value not compared (list both short and long forms explicitly — there is no flag-alias table) |
+| `cmdlet` | PowerShell | Canonical Verb-Noun cmdlet name, e.g. `"Remove-Item"`; built-in aliases are resolved to it before matching |
 | `tools` | any tool | List of `tool_name` values this rule applies to, e.g. `["Read", "Edit"]` |
 | `path` | Read/Edit/Write | Glob pattern matched against `tool_input.file_path` |
 | `when` | any | Raw CEL boolean expression |
 
-A rule must set exactly one of `tool` or `tools` (or rely solely on `when`),
-and must have at least one condition (sugar and/or `when`).
+A rule must set exactly one of `tool`, `cmdlet`, or `tools` (or rely solely
+on `when`), and must have at least one condition (sugar and/or `when`).
 
 #### CEL variable table
 
@@ -129,6 +144,7 @@ Available to every `when:` expression and every sugar compilation:
 | `tool_name` | `string` | `tool_name` from the hook payload | e.g. `"Bash"`, `"Read"` |
 | `tool_input` | `dyn` (map) | decoded `tool_input` JSON object | generic, e.g. `{"file_path": "..."}` |
 | `segment` | `dyn` (map) | current Bash segment (Bash only) | `{tool, subcommand, flags, args}`; zero-value map for non-Bash calls (`tool:"", subcommand:"", flags:[], args:[]`), never missing/null |
+| `ps_segment` | `dyn` (map) | current PowerShell segment (PowerShell only) | `{cmdlet, parameters, switches, args}`; `parameters` is a map of parameter name → value, `switches`/`args` are lists; zero-value map for non-PowerShell calls, never missing/null |
 | `cwd` | `string` | `cwd` from the hook payload | |
 | `session_id` | `string` | `session_id` from the hook payload | |
 
@@ -171,11 +187,24 @@ Add to `~/.claude/settings.json` (personal) or `.claude/settings.json`
             "command": "hookguard"
           }
         ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "hookguard"
+          }
+        ]
       }
     ]
   }
 }
 ```
+
+Register both matchers on Windows: without the `PowerShell` matcher, `hookguard`
+never sees PowerShell tool calls, leaving them as an unregulated bypass of
+the gate ("just use PowerShell instead of Bash").
 
 If you installed the binary to a non-standard path, use the full path:
 
@@ -210,6 +239,15 @@ user or project settings:
             "command": "HOOKGUARD_POLICY=/etc/claude-code/hookguard.yaml /usr/local/bin/hookguard"
           }
         ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "HOOKGUARD_POLICY=/etc/claude-code/hookguard.yaml /usr/local/bin/hookguard"
+          }
+        ]
       }
     ]
   }
@@ -227,7 +265,7 @@ Every tool call is appended to the file configured in `audit_log` as JSONL:
 {"ts":"2026-07-01T10:00:05Z","session_id":"abc123","cwd":"/app","tool_name":"Read","action":"deny","reason":"reading .env files may leak secrets"}
 ```
 
-`cmd` is only populated for Bash tool calls.
+`cmd` is only populated for Bash and PowerShell tool calls.
 
 Parse with `jq`:
 
@@ -273,6 +311,21 @@ outright. There is no automatic migration — hookguard has no prior
 users/configurations to migrate. If you need the old schema, check out a
 Git tag prior to this change.
 
+## Breaking change: PowerShell is now parsed, not blanket-asked
+
+`powershell_action` (a single blanket `allow`/`deny`/`ask` for every
+PowerShell call, no inspection performed) is replaced by real PowerShell
+parsing plus `powershell_opaque_execution_guard` — see
+[ADR 0005](docs/adr/0005-hand-written-powershell-tokenizer.md). This is a
+hard cutover, not a validated migration: a config file that still sets
+`powershell_action` will load without error (YAML silently ignores unknown
+fields) but the field no longer has any effect — PowerShell calls will be
+governed by real parsing, `default_action`, and
+`powershell_opaque_execution_guard` instead. Migrate by replacing
+`powershell_action` with `powershell_opaque_execution_guard: { action: ... }`
+and adding `cmdlet:` rules for anything you want to control beyond
+`default_action`.
+
 ---
 
 ## Development
@@ -313,8 +366,11 @@ hookguard/
 ├── cmd/hookguard/main.go            # entry point: stdin→decision→stdout
 ├── internal/
 │   ├── shell/
-│   │   ├── tokenizer.go            # shell-aware command parser
+│   │   ├── tokenizer.go            # Bash command parser (mvdan.cc/sh)
 │   │   └── tokenizer_test.go
+│   ├── powershell/
+│   │   ├── parser.go               # hand-written PowerShell 7+ tokenizer
+│   │   └── parser_test.go
 │   ├── policy/
 │   │   ├── policy.go               # Rule/Policy types, Load, Evaluate
 │   │   ├── cel_env.go              # CEL environment + glob() function

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"hookguard/internal/policy"
+	"hookguard/internal/powershell"
 	"hookguard/internal/shell"
 )
 
@@ -19,7 +20,8 @@ audit_log: ""
 opaque_execution_guard:
   action: ask
 
-powershell_action: ask
+powershell_opaque_execution_guard:
+  action: ask
 
 rules:
   - tool: git
@@ -94,6 +96,13 @@ rules:
     when: 'tool_input.file_path.matches("id_rsa$")'
     action: deny
     reason: "reading SSH private keys is not allowed"
+
+  - cmdlet: Remove-Item
+    action: ask
+
+  - cmdlet: Stop-Process
+    deny_flags: ["Force"]
+    action: deny
 `
 
 func loadTestPolicy(t *testing.T) *policy.Policy {
@@ -115,6 +124,17 @@ func seg(tool, sub string, flags, args []string) *shell.Segment {
 
 func evalBash(p *policy.Policy, s *shell.Segment) policy.EvalResult {
 	return p.Evaluate(policy.Activation{ToolName: "Bash", Segment: s})
+}
+
+func psSeg(cmdlet string, params map[string]string, switches, args []string) *powershell.Segment {
+	if params == nil {
+		params = map[string]string{}
+	}
+	return &powershell.Segment{Cmdlet: cmdlet, Parameters: params, Switches: switches, Args: args}
+}
+
+func evalPS(p *policy.Policy, s *powershell.Segment) policy.EvalResult {
+	return p.Evaluate(policy.Activation{ToolName: "PowerShell", PSSegment: s})
 }
 
 // ─── git push ────────────────────────────────────────────────────────────────
@@ -219,6 +239,40 @@ func TestGitLog_Allowed(t *testing.T) {
 	r := evalBash(p, seg("git", "log", []string{"--oneline"}, nil))
 	if r.Action != policy.ActionAllow {
 		t.Errorf("want allow for git log, got %s: %s", r.Action, r.Reason)
+	}
+}
+
+// ─── PowerShell cmdlets ──────────────────────────────────────────────────────
+
+func TestCmdletRemoveItem_Ask(t *testing.T) {
+	p := loadTestPolicy(t)
+	r := evalPS(p, psSeg("Remove-Item", nil, []string{"Recurse", "Force"}, []string{"C:\\temp"}))
+	if r.Action != policy.ActionAsk {
+		t.Errorf("want ask for Remove-Item, got %s: %s", r.Action, r.Reason)
+	}
+}
+
+func TestCmdletStopProcessForce_Denied(t *testing.T) {
+	p := loadTestPolicy(t)
+	r := evalPS(p, psSeg("Stop-Process", nil, []string{"Force"}, []string{"notepad"}))
+	if r.Action != policy.ActionDeny {
+		t.Errorf("want deny for Stop-Process -Force, got %s: %s", r.Action, r.Reason)
+	}
+}
+
+func TestCmdletStopProcessNoForce_DefaultAction(t *testing.T) {
+	p := loadTestPolicy(t)
+	r := evalPS(p, psSeg("Stop-Process", nil, nil, []string{"notepad"}))
+	if r.Action != policy.ActionDeny {
+		t.Errorf("want default_action (deny), got %s: %s", r.Action, r.Reason)
+	}
+}
+
+func TestCmdletUnrelated_DefaultAction(t *testing.T) {
+	p := loadTestPolicy(t)
+	r := evalPS(p, psSeg("Get-ChildItem", nil, nil, nil))
+	if r.Action != policy.ActionDeny {
+		t.Errorf("want default_action (deny) for unmatched cmdlet, got %s: %s", r.Action, r.Reason)
 	}
 }
 
@@ -458,8 +512,8 @@ rules:
 }
 
 func TestLoad_SecureDefaults(t *testing.T) {
-	// An empty policy must still default to deny, ask-on-opaque, and
-	// ask-on-powershell.
+	// An empty policy must still default to deny and ask-on-opaque for both
+	// Bash and PowerShell.
 	tmp := filepath.Join(t.TempDir(), "hookguard.yaml")
 	_ = os.WriteFile(tmp, []byte("version: 1\n"), 0o644)
 	p, err := policy.Load(tmp)
@@ -473,7 +527,7 @@ func TestLoad_SecureDefaults(t *testing.T) {
 	if p.OpaqueGuard.Action != policy.ActionAsk {
 		t.Errorf("opaque guard should default to ask, got %s", p.OpaqueGuard.Action)
 	}
-	if p.PowerShellAction != policy.ActionAsk {
-		t.Errorf("powershell_action should default to ask, got %s", p.PowerShellAction)
+	if p.PowerShellOpaqueGuard.Action != policy.ActionAsk {
+		t.Errorf("powershell_opaque_execution_guard should default to ask, got %s", p.PowerShellOpaqueGuard.Action)
 	}
 }
