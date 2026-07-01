@@ -9,10 +9,11 @@
 #   ask   — escalate to the user for interactive confirmation
 #
 # Schema: a single `rules:` list, evaluated with CEL. Each rule matches via
-# sugar fields (`tool`/`subcommand`/`deny_flags` for Bash, `tools`/`path` for
-# Read/Edit/Write) and/or a raw `when:` CEL expression. When several rules
-# match the same tool call, the most severe action wins (deny > ask > allow),
-# not the rule that appears first in the list.
+# sugar fields (`tool`/`subcommand`/`deny_flags` for Bash, `cmdlet`/
+# `deny_flags` for PowerShell, `tools`/`path` for Read/Edit/Write) and/or a
+# raw `when:` CEL expression. When several rules match the same tool call,
+# the most severe action wins (deny > ask > allow), not the rule that
+# appears first in the list.
 #
 # See README.md for the full schema reference and CEL variable table.
 
@@ -33,9 +34,15 @@ audit_log: "~/.claude/hookguard-audit.jsonl"
 opaque_execution_guard:
   action: ask
 
-# PowerShell calls are not parsed at all (Windows); this is the blanket
-# decision for every PowerShell tool call.
-powershell_action: ask
+# Fired when a PowerShell command cannot be safely parsed, or contains a
+# construct that cannot be safely decomposed into cmdlet segments:
+# Invoke-Expression/iex, dot-sourcing, dynamic "&" call-operator targets,
+# -EncodedCommand, Add-Type, control structures (if/while/for/foreach/switch),
+# etc. Configured separately from opaque_execution_guard (Bash) since the two
+# parsers are independent implementations with independent risk profiles —
+# see docs/adr/0005-hand-written-powershell-tokenizer.md.
+powershell_opaque_execution_guard:
+  action: ask
 
 rules:
 
@@ -218,6 +225,23 @@ rules:
     action: ask
   - tool: bash
     action: ask
+
+  # ── PowerShell cmdlets ───────────────────────────────────────────────────
+  # `cmdlet:` matches the canonical Verb-Noun name; built-in aliases (rm/ri,
+  # curl/iwr, etc.) are resolved to it before matching, so these rules also
+  # cover the aliased spelling.
+  - cmdlet: Remove-Item
+    action: ask
+    reason: "always require confirmation for Remove-Item"
+
+  - cmdlet: Invoke-WebRequest
+    action: ask
+    reason: "network egress; ask before sending data out"
+
+  - cmdlet: Stop-Process
+    deny_flags: ["Force"]
+    action: ask
+    reason: "force-stopping a process can lose unsaved state"
 
   # ── path sugar: sensitive files (Read/Edit/Write) ───────────────────────
   - tools: ["Read"]

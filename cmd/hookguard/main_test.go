@@ -24,8 +24,9 @@ func loadTestPolicy(t *testing.T, yamlContent string) *policy.Policy {
 const testYAML = `
 version: 1
 default_action: deny
-powershell_action: ask
 opaque_execution_guard:
+  action: ask
+powershell_opaque_execution_guard:
   action: ask
 
 rules:
@@ -38,13 +39,17 @@ rules:
     action: deny
     reason: "force-push denied"
 
+  - cmdlet: Remove-Item
+    action: ask
+    reason: "always ask for Remove-Item"
+
   - tools: ["Read"]
     path: "**/.env*"
     action: deny
     reason: "env file read denied"
 `
 
-func TestDecide_PowerShellShortCircuits(t *testing.T) {
+func TestDecide_PowerShellRuleMatch(t *testing.T) {
 	pol := loadTestPolicy(t, testYAML)
 	input := hookInput{
 		ToolName:  "PowerShell",
@@ -52,7 +57,31 @@ func TestDecide_PowerShellShortCircuits(t *testing.T) {
 	}
 	action, _ := decide(input, pol)
 	if action != policy.ActionAsk {
-		t.Errorf("want configured powershell_action (ask), got %s", action)
+		t.Errorf("want ask (cmdlet rule matched), got %s", action)
+	}
+}
+
+func TestDecide_PowerShellOpaqueGuard(t *testing.T) {
+	pol := loadTestPolicy(t, testYAML)
+	input := hookInput{
+		ToolName:  "PowerShell",
+		ToolInput: map[string]any{"command": "Invoke-Expression $x"},
+	}
+	action, reason := decide(input, pol)
+	if action != policy.ActionAsk {
+		t.Errorf("want ask (powershell_opaque_execution_guard), got %s: %s", action, reason)
+	}
+}
+
+func TestDecide_PowerShellDefaultAction(t *testing.T) {
+	pol := loadTestPolicy(t, testYAML)
+	input := hookInput{
+		ToolName:  "PowerShell",
+		ToolInput: map[string]any{"command": "Get-ChildItem"},
+	}
+	action, _ := decide(input, pol)
+	if action != policy.ActionDeny {
+		t.Errorf("want default_action (deny) for unmatched cmdlet, got %s", action)
 	}
 }
 

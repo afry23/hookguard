@@ -12,6 +12,7 @@ import (
 	"github.com/google/cel-go/cel"
 	"gopkg.in/yaml.v3"
 
+	"hookguard/internal/powershell"
 	"hookguard/internal/shell"
 )
 
@@ -49,10 +50,15 @@ func Severity(a Action) int {
 // via sugar fields, a raw when-expression, or both (ANDed together), and
 // resolves to Action if it matches.
 type Rule struct {
-	// Bash sugar (exclusive with Tools/Path).
+	// Bash sugar (exclusive with Tools/Path/Cmdlet).
 	Tool       string   `yaml:"tool"`
 	Subcommand string   `yaml:"subcommand"`
 	DenyFlags  []string `yaml:"deny_flags"`
+
+	// PowerShell sugar (exclusive with Tool/Tools/Path). DenyFlags is shared
+	// with the Bash sugar above: for a Cmdlet rule it checks both PSSegment
+	// parameter names and switch names (value not compared -- see ADR 0005).
+	Cmdlet string `yaml:"cmdlet"`
 
 	// Path sugar (Read/Edit/Write).
 	Tools []string `yaml:"tools"`
@@ -86,9 +92,15 @@ type Policy struct {
 	// Defaults to "ask" when empty.
 	OpaqueGuard OpaqueGuard `yaml:"opaque_execution_guard"`
 
-	// PowerShellAction is the blanket decision for PowerShell tool calls
-	// (no parsing performed). Defaults to "ask" when empty.
-	PowerShellAction Action `yaml:"powershell_action"`
+	// PowerShellOpaqueGuard controls the decision when a PowerShell command
+	// cannot be safely parsed, or contains a construct that cannot be safely
+	// decomposed into PowerShell-Segments (Invoke-Expression, dot-sourcing,
+	// dynamic call-operator targets, -EncodedCommand, Add-Type, control
+	// structures, etc). Configured separately from OpaqueGuard (Bash) since
+	// the two parsers are independent implementations with independent risk
+	// profiles -- see docs/adr/0005-hand-written-powershell-tokenizer.md.
+	// Defaults to "ask" when empty.
+	PowerShellOpaqueGuard OpaqueGuard `yaml:"powershell_opaque_execution_guard"`
 }
 
 // OpaqueGuard controls what happens when an opaque execution construct is
@@ -106,7 +118,8 @@ type Activation struct {
 	ToolInput map[string]any
 	Cwd       string
 	SessionID string
-	Segment   *shell.Segment // nil for non-Bash tool calls
+	Segment   *shell.Segment      // nil for non-Bash tool calls
+	PSSegment *powershell.Segment // nil for non-PowerShell tool calls
 }
 
 // EvalResult is the outcome of evaluating one Activation.
@@ -139,8 +152,8 @@ func Load(path string) (*Policy, error) {
 	if p.OpaqueGuard.Action == "" {
 		p.OpaqueGuard.Action = ActionAsk
 	}
-	if p.PowerShellAction == "" {
-		p.PowerShellAction = ActionAsk
+	if p.PowerShellOpaqueGuard.Action == "" {
+		p.PowerShellOpaqueGuard.Action = ActionAsk
 	}
 
 	env, err := newCELEnv()
@@ -167,6 +180,7 @@ func (p *Policy) Evaluate(a Activation) EvalResult {
 	bestSeverity := -1
 
 	segMap := segmentToMap(a.Segment)
+	psSegMap := psSegmentToMap(a.PSSegment)
 
 	for i := range p.Rules {
 		r := &p.Rules[i]
@@ -179,6 +193,7 @@ func (p *Policy) Evaluate(a Activation) EvalResult {
 			"tool_name":  a.ToolName,
 			"tool_input": toolInputToMap(a.ToolInput),
 			"segment":    segMap,
+			"ps_segment": psSegMap,
 			"cwd":        a.Cwd,
 			"session_id": a.SessionID,
 		}
@@ -246,6 +261,27 @@ func segmentToMap(s *shell.Segment) map[string]any {
 		"tool":       s.Tool,
 		"subcommand": s.Subcommand,
 		"flags":      toAnySlice(s.Flags),
+		"args":       toAnySlice(s.Args),
+	}
+}
+
+func psSegmentToMap(s *powershell.Segment) map[string]any {
+	if s == nil {
+		return map[string]any{
+			"cmdlet":     "",
+			"parameters": map[string]any{},
+			"switches":   []any{},
+			"args":       []any{},
+		}
+	}
+	params := make(map[string]any, len(s.Parameters))
+	for k, v := range s.Parameters {
+		params[k] = v
+	}
+	return map[string]any{
+		"cmdlet":     s.Cmdlet,
+		"parameters": params,
+		"switches":   toAnySlice(s.Switches),
 		"args":       toAnySlice(s.Args),
 	}
 }

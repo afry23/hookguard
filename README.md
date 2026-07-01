@@ -75,7 +75,8 @@ audit_log: ~/.claude/hookguard-audit.jsonl
 opaque_execution_guard:
   action: ask                  # eval / sh -c / $(...) → ask user
 
-powershell_action: ask         # blanket decision for PowerShell calls (no parsing)
+powershell_opaque_execution_guard:
+  action: ask                  # Invoke-Expression / dot-sourcing / etc. → ask user
 
 rules:
   # Bash sugar: tool / subcommand / deny_flags compile to a CEL expression
@@ -85,6 +86,13 @@ rules:
     deny_flags: ["--force", "--force-with-lease", "-f"]
     action: deny
     reason: "force-push rewrites remote history"
+
+  # PowerShell sugar: cmdlet / deny_flags compile to a CEL expression matching
+  # PowerShell segments. Built-in aliases (rm/ri → Remove-Item, etc.) are
+  # resolved to the canonical cmdlet name before matching.
+  - cmdlet: Remove-Item
+    action: ask
+    reason: "always require confirmation for Remove-Item"
 
   # Path sugar: tools / path compile to a CEL expression matching
   # tool_input.file_path for the listed tools.
@@ -112,13 +120,14 @@ match several rules; the most severe `action` wins, regardless of rule order
 |---|---|---|
 | `tool` | Bash | Primary executable, e.g. `"git"` |
 | `subcommand` | Bash | First non-flag argument, e.g. `"push"` |
-| `deny_flags` | Bash | Match if any of these flags is present (list both short and long forms explicitly — there is no flag-alias table) |
+| `deny_flags` | Bash or PowerShell | Bash: match if any of these flags is present. PowerShell (with `cmdlet`): match if any of these parameter or switch **names** is present, value not compared (list both short and long forms explicitly — there is no flag-alias table) |
+| `cmdlet` | PowerShell | Canonical Verb-Noun cmdlet name, e.g. `"Remove-Item"`; built-in aliases are resolved to it before matching |
 | `tools` | any tool | List of `tool_name` values this rule applies to, e.g. `["Read", "Edit"]` |
 | `path` | Read/Edit/Write | Glob pattern matched against `tool_input.file_path` |
 | `when` | any | Raw CEL boolean expression |
 
-A rule must set exactly one of `tool` or `tools` (or rely solely on `when`),
-and must have at least one condition (sugar and/or `when`).
+A rule must set exactly one of `tool`, `cmdlet`, or `tools` (or rely solely
+on `when`), and must have at least one condition (sugar and/or `when`).
 
 #### CEL variable table
 
@@ -129,6 +138,7 @@ Available to every `when:` expression and every sugar compilation:
 | `tool_name` | `string` | `tool_name` from the hook payload | e.g. `"Bash"`, `"Read"` |
 | `tool_input` | `dyn` (map) | decoded `tool_input` JSON object | generic, e.g. `{"file_path": "..."}` |
 | `segment` | `dyn` (map) | current Bash segment (Bash only) | `{tool, subcommand, flags, args}`; zero-value map for non-Bash calls (`tool:"", subcommand:"", flags:[], args:[]`), never missing/null |
+| `ps_segment` | `dyn` (map) | current PowerShell segment (PowerShell only) | `{cmdlet, parameters, switches, args}`; `parameters` is a map of parameter name → value, `switches`/`args` are lists; zero-value map for non-PowerShell calls, never missing/null |
 | `cwd` | `string` | `cwd` from the hook payload | |
 | `session_id` | `string` | `session_id` from the hook payload | |
 
@@ -272,6 +282,21 @@ The unified CEL-based `rules:` schema replaces the previous `tools:` tree
 outright. There is no automatic migration — hookguard has no prior
 users/configurations to migrate. If you need the old schema, check out a
 Git tag prior to this change.
+
+## Breaking change: PowerShell is now parsed, not blanket-asked
+
+`powershell_action` (a single blanket `allow`/`deny`/`ask` for every
+PowerShell call, no inspection performed) is replaced by real PowerShell
+parsing plus `powershell_opaque_execution_guard` — see
+[ADR 0005](docs/adr/0005-hand-written-powershell-tokenizer.md). This is a
+hard cutover, not a validated migration: a config file that still sets
+`powershell_action` will load without error (YAML silently ignores unknown
+fields) but the field no longer has any effect — PowerShell calls will be
+governed by real parsing, `default_action`, and
+`powershell_opaque_execution_guard` instead. Migrate by replacing
+`powershell_action` with `powershell_opaque_execution_guard: { action: ... }`
+and adding `cmdlet:` rules for anything you want to control beyond
+`default_action`.
 
 ---
 
