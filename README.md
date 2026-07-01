@@ -5,12 +5,12 @@ Every tool call Claude attempts to make — Bash commands, file reads/writes,
 and more — is evaluated against a declarative policy before execution.
 
 ```
-Claude Code (PreToolUse: Bash / Read / Edit / Write / …)
+Claude Code (PreToolUse: Bash / PowerShell / Read / Edit / Write / …)
         │  JSON via stdin
         ▼
   ┌───────────────────────────────┐
   │  hookguard  (Go binary)       │
-  │  1. Shell-aware tokeniser     │  ← mvdan.cc/sh/v3 (not regex, Bash only)
+  │  1. Shell-aware tokeniser     │  ← mvdan.cc/sh/v3 (Bash) or internal/powershell (PowerShell 7+)
   │  2. Rules compiled to CEL     │  ← hookguard.yaml, cel-go
   │  3. Severity-based resolution │  ← deny > ask > allow
   │  4. Audit log (JSONL)         │
@@ -23,11 +23,17 @@ Claude Code (PreToolUse: Bash / Read / Edit / Write / …)
 **Key properties**
 
 - A single `rules:` list, evaluated with [CEL](https://github.com/google/cel-go),
-  covers Bash segments *and* generic `tool_input` fields for Read/Edit/Write
-  and any other tool.
-- Shell-correct parsing via `mvdan.cc/sh/v3` — respects quoting, pipelines,
-  `&&`/`||`/`;`, and reliably detects opaque constructs (`eval`, `sh -c`,
-  `$(…)`, `xargs`, …).
+  covers Bash segments, PowerShell segments, *and* generic `tool_input`
+  fields for Read/Edit/Write and any other tool.
+- Shell-correct parsing via `mvdan.cc/sh/v3` for Bash — respects quoting,
+  pipelines, `&&`/`||`/`;`, and reliably detects opaque constructs (`eval`,
+  `sh -c`, `$(…)`, `xargs`, …).
+- PowerShell 7+ is parsed by a dedicated hand-written tokenizer
+  (`internal/powershell`, no maintained Go library exists for this — see
+  [ADR 0005](docs/adr/0005-hand-written-powershell-tokenizer.md)), resolving
+  built-in aliases (`rm`/`ri` → `Remove-Item`, …) and reliably detecting
+  opaque constructs (`Invoke-Expression`, dot-sourcing, dynamic `&`
+  call-operator targets, `-EncodedCommand`, `Add-Type`, control structures).
 - Combined short flags are expanded (`-rf` → `-r`, `-f`) before matching.
 - When several rules match the same tool call, the most **severe** action
   wins (`deny > ask > allow`) — not the rule that appears first in the file.
@@ -181,11 +187,24 @@ Add to `~/.claude/settings.json` (personal) or `.claude/settings.json`
             "command": "hookguard"
           }
         ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "hookguard"
+          }
+        ]
       }
     ]
   }
 }
 ```
+
+Register both matchers on Windows: without the `PowerShell` matcher, `hookguard`
+never sees PowerShell tool calls, leaving them as an unregulated bypass of
+the gate ("just use PowerShell instead of Bash").
 
 If you installed the binary to a non-standard path, use the full path:
 
@@ -220,6 +239,15 @@ user or project settings:
             "command": "HOOKGUARD_POLICY=/etc/claude-code/hookguard.yaml /usr/local/bin/hookguard"
           }
         ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "HOOKGUARD_POLICY=/etc/claude-code/hookguard.yaml /usr/local/bin/hookguard"
+          }
+        ]
       }
     ]
   }
@@ -237,7 +265,7 @@ Every tool call is appended to the file configured in `audit_log` as JSONL:
 {"ts":"2026-07-01T10:00:05Z","session_id":"abc123","cwd":"/app","tool_name":"Read","action":"deny","reason":"reading .env files may leak secrets"}
 ```
 
-`cmd` is only populated for Bash tool calls.
+`cmd` is only populated for Bash and PowerShell tool calls.
 
 Parse with `jq`:
 
@@ -338,8 +366,11 @@ hookguard/
 ├── cmd/hookguard/main.go            # entry point: stdin→decision→stdout
 ├── internal/
 │   ├── shell/
-│   │   ├── tokenizer.go            # shell-aware command parser
+│   │   ├── tokenizer.go            # Bash command parser (mvdan.cc/sh)
 │   │   └── tokenizer_test.go
+│   ├── powershell/
+│   │   ├── parser.go               # hand-written PowerShell 7+ tokenizer
+│   │   └── parser_test.go
 │   ├── policy/
 │   │   ├── policy.go               # Rule/Policy types, Load, Evaluate
 │   │   ├── cel_env.go              # CEL environment + glob() function
