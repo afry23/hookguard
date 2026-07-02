@@ -1,19 +1,21 @@
 # hookguard
 
-A CEL-driven security gateway for Claude Code's `PreToolUse` hook.
-Every tool call Claude attempts to make — Bash commands, file reads/writes,
-and more — is evaluated against a declarative policy before execution.
+A CEL-driven security gateway for Claude Code **and Codex CLI** `PreToolUse` hooks.
+Every tool call an agent attempts to make — Bash commands, file reads/writes,
+`apply_patch` edits, and more — is evaluated against a declarative policy before
+execution. A single `hookguard.yaml` guards both agent CLIs.
 
 ```
-Claude Code (PreToolUse: Bash / PowerShell / Read / Edit / Write / …)
+Claude Code / Codex CLI (PreToolUse: Bash / PowerShell / apply_patch / Read / Edit / Write / …)
         │  JSON via stdin
         ▼
   ┌───────────────────────────────┐
   │  hookguard  (Go binary)       │
   │  1. Shell-aware tokeniser     │  ← mvdan.cc/sh/v3 (Bash) or internal/powershell (PowerShell 7+)
-  │  2. Rules compiled to CEL     │  ← hookguard.yaml, cel-go
-  │  3. Severity-based resolution │  ← deny > ask > allow
-  │  4. Audit log (JSONL)         │
+  │  2. Patch parser              │  ← internal/patch (Codex apply_patch → Patch-Segments)
+  │  3. Rules compiled to CEL     │  ← hookguard.yaml, cel-go
+  │  4. Severity-based resolution │  ← deny > ask > allow
+  │  5. Audit log (JSONL)         │
   └───────────────────────────────┘
         │  JSON via stdout
         ▼
@@ -23,8 +25,9 @@ Claude Code (PreToolUse: Bash / PowerShell / Read / Edit / Write / …)
 **Key properties**
 
 - A single `rules:` list, evaluated with [CEL](https://github.com/google/cel-go),
-  covers Bash segments, PowerShell segments, *and* generic `tool_input`
-  fields for Read/Edit/Write and any other tool.
+  covers Bash segments, PowerShell segments, Patch-Segments (Codex
+  `apply_patch`), *and* generic `tool_input` fields for Read/Edit/Write and any
+  other tool.
 - Shell-correct parsing via `mvdan.cc/sh/v3` for Bash — respects quoting,
   pipelines, `&&`/`||`/`;`, and reliably detects opaque constructs (`eval`,
   `sh -c`, `$(…)`, `xargs`, …).
@@ -34,9 +37,15 @@ Claude Code (PreToolUse: Bash / PowerShell / Read / Edit / Write / …)
   built-in aliases (`rm`/`ri` → `Remove-Item`, …) and reliably detecting
   opaque constructs (`Invoke-Expression`, dot-sourcing, dynamic `&`
   call-operator targets, `-EncodedCommand`, `Add-Type`, control structures).
+- Codex `apply_patch` calls are decomposed into Patch-Segments (one per
+  `*** Add File` / `*** Update File` / `*** Delete File` / `*** Move to:`
+  section) and evaluated against existing `tools`/`path` rules as `Write` or
+  `Edit` operations — no new rules needed.
 - Combined short flags are expanded (`-rf` → `-r`, `-f`) before matching.
 - When several rules match the same tool call, the most **severe** action
   wins (`deny > ask > allow`) — not the rule that appears first in the file.
+- Codex has no interactive ask channel — `ask` decisions are automatically
+  downgraded to `deny` under `hookguard codex` (see [ADR 0006](docs/adr/)).
 - `deny` decisions from this hook survive `--dangerously-skip-permissions`
   and `bypassPermissions` mode (Claude Code PreToolUse guarantee).
 - Single static binary; no interpreter runtime needed on developer machines.
@@ -63,13 +72,20 @@ installing.
 
 ## Configure the policy
 
-Copy the example policy to the default location:
+Copy the example policy to the default location for Claude Code:
 
 ```bash
 cp config/hookguard.yaml ~/.claude/hookguard.yaml
 ```
 
-Edit `~/.claude/hookguard.yaml` to match your team's requirements.
+For Codex CLI, copy to its default location:
+
+```bash
+cp config/hookguard.yaml ~/.codex/hookguard.yaml
+```
+
+Edit the file to match your team's requirements. The same policy file can be
+shared between both hosts by setting `HOOKGUARD_POLICY` to a common path.
 
 ### Schema reference
 
@@ -83,6 +99,10 @@ opaque_execution_guard:
 
 powershell_opaque_execution_guard:
   action: ask                  # Invoke-Expression / dot-sourcing / etc. → ask user
+
+patch_opaque_execution_guard:
+  action: ask                  # malformed apply_patch text → ask user
+                               # (downgraded to deny under hookguard codex)
 
 rules:
   # Bash sugar: tool / subcommand / deny_flags compile to a CEL expression
@@ -101,7 +121,8 @@ rules:
     reason: "always require confirmation for Remove-Item"
 
   # Path sugar: tools / path compile to a CEL expression matching
-  # tool_input.file_path for the listed tools.
+  # tool_input.file_path for the listed tools. Also matches Codex apply_patch
+  # segments, which are decomposed into Edit/Write operations per file.
   - tools: ["Read"]
     path: "**/.env*"
     action: deny
@@ -126,10 +147,10 @@ match several rules; the most severe `action` wins, regardless of rule order
 |---|---|---|
 | `tool` | Bash | Primary executable, e.g. `"git"` |
 | `subcommand` | Bash | First non-flag argument, e.g. `"push"` |
-| `deny_flags` | Bash or PowerShell | Bash: match if any of these flags is present. PowerShell (with `cmdlet`): match if any of these parameter or switch **names** is present, value not compared (list both short and long forms explicitly — there is no flag-alias table) |
+| `deny_flags` | Bash or PowerShell | Bash: match if any of these flags is present. PowerShell (with `cmdlet`): match if any of these parameter or switch **names** is present, value not compared |
 | `cmdlet` | PowerShell | Canonical Verb-Noun cmdlet name, e.g. `"Remove-Item"`; built-in aliases are resolved to it before matching |
 | `tools` | any tool | List of `tool_name` values this rule applies to, e.g. `["Read", "Edit"]` |
-| `path` | Read/Edit/Write | Glob pattern matched against `tool_input.file_path` |
+| `path` | Read/Edit/Write | Glob pattern matched against `tool_input.file_path`; also matched against Codex Patch-Segments (decomposed to Edit/Write) |
 | `when` | any | Raw CEL boolean expression |
 
 A rule must set exactly one of `tool`, `cmdlet`, or `tools` (or rely solely
@@ -141,12 +162,17 @@ Available to every `when:` expression and every sugar compilation:
 
 | Name | CEL type | Source | Notes |
 |---|---|---|---|
-| `tool_name` | `string` | `tool_name` from the hook payload | e.g. `"Bash"`, `"Read"` |
+| `tool_name` | `string` | `tool_name` from the hook payload | e.g. `"Bash"`, `"Read"`, `"apply_patch"` |
 | `tool_input` | `dyn` (map) | decoded `tool_input` JSON object | generic, e.g. `{"file_path": "..."}` |
-| `segment` | `dyn` (map) | current Bash segment (Bash only) | `{tool, subcommand, flags, args}`; zero-value map for non-Bash calls (`tool:"", subcommand:"", flags:[], args:[]`), never missing/null |
-| `ps_segment` | `dyn` (map) | current PowerShell segment (PowerShell only) | `{cmdlet, parameters, switches, args}`; `parameters` is a map of parameter name → value, `switches`/`args` are lists; zero-value map for non-PowerShell calls, never missing/null |
+| `segment` | `dyn` (map) | current Bash segment (Bash only) | `{tool, subcommand, flags, args}`; zero-value for non-Bash calls |
+| `ps_segment` | `dyn` (map) | current PowerShell segment (PowerShell only) | `{cmdlet, parameters, switches, args}`; zero-value for non-PowerShell calls |
 | `cwd` | `string` | `cwd` from the hook payload | |
 | `session_id` | `string` | `session_id` from the hook payload | |
+| `model` | `string` | Codex only — model name | empty string for Claude Code |
+| `permission_mode` | `string` | Codex only — e.g. `"auto"`, `"suggest"` | empty string for Claude Code |
+| `turn_id` | `string` | Codex only | empty string for Claude Code |
+| `tool_use_id` | `string` | Codex only | empty string for Claude Code |
+| `transcript_path` | `string` | Codex only — path to session transcript | empty string for Claude Code or when null |
 
 #### `glob(path, pattern)`
 
@@ -161,12 +187,19 @@ never silently resolve to `allow`. Compile-time errors (bad CEL syntax,
 malformed glob patterns, invalid sugar-field combinations) fail `Load()`
 immediately.
 
+#### Ask-to-deny downgrade (Codex)
+
+Codex CLI has no interactive ask channel. When hookguard is invoked as
+`hookguard codex`, any `ask` decision — from a matched rule, an opaque guard,
+or the `HOOKGUARD_FAIL_MODE` default — is automatically downgraded to `deny`.
+This applies for every `tool_name`, not just Bash. See [ADR 0006](docs/adr/).
+
 ### Environment variables
 
-| Variable | Default | Description |
-|---|---|---|
-| `HOOKGUARD_POLICY` | `~/.claude/hookguard.yaml` | Override policy file path |
-| `HOOKGUARD_FAIL_MODE` | `ask` | Decision when policy file is missing (`allow`/`deny`/`ask`) |
+| Variable | Default (Claude) | Default (Codex) | Description |
+|---|---|---|---|
+| `HOOKGUARD_POLICY` | `~/.claude/hookguard.yaml` | `~/.codex/hookguard.yaml` | Override policy file path |
+| `HOOKGUARD_FAIL_MODE` | `ask` | `ask` (→ deny) | Decision when policy file is missing |
 
 ---
 
@@ -181,21 +214,11 @@ Add to `~/.claude/settings.json` (personal) or `.claude/settings.json`
     "PreToolUse": [
       {
         "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "hookguard"
-          }
-        ]
+        "hooks": [{ "type": "command", "command": "hookguard" }]
       },
       {
         "matcher": "PowerShell",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "hookguard"
-          }
-        ]
+        "hooks": [{ "type": "command", "command": "hookguard" }]
       }
     ]
   }
@@ -217,6 +240,39 @@ To pass a custom policy file:
 ```json
 "command": "HOOKGUARD_POLICY=/etc/claude-code/hookguard.yaml hookguard"
 ```
+
+---
+
+## Register as a Codex CLI hook
+
+Add to `~/.codex/config.toml`:
+
+```toml
+[[hooks]]
+  event = "pre_tool_use"
+  command = "hookguard codex"
+  matchers = ["Bash", "apply_patch"]
+```
+
+Codex reports all shell execution (including PowerShell on Windows) as the
+`"Bash"` tool name — there is no separate `PowerShell` matcher under Codex.
+hookguard detects Windows at runtime and routes `Bash` calls to the
+PowerShell parser automatically.
+
+The per-host default policy path is `~/.codex/hookguard.yaml` (see [ADR 0008](docs/adr/)).
+Set `HOOKGUARD_POLICY` to share a single file between Claude Code and Codex.
+
+---
+
+## Invocation forms
+
+| Command | Host | Default policy path |
+|---|---|---|
+| `hookguard` | Claude Code | `~/.claude/hookguard.yaml` |
+| `hookguard claude` | Claude Code | `~/.claude/hookguard.yaml` |
+| `hookguard codex` | Codex CLI | `~/.codex/hookguard.yaml` |
+
+---
 
 ### Enterprise / team deployment
 
@@ -261,11 +317,12 @@ user or project settings:
 Every tool call is appended to the file configured in `audit_log` as JSONL:
 
 ```jsonl
-{"ts":"2026-07-01T10:00:00Z","session_id":"abc123","cwd":"/app","tool_name":"Bash","cmd":"git push --force origin main","action":"deny","reason":"force-push rewrites remote history"}
-{"ts":"2026-07-01T10:00:05Z","session_id":"abc123","cwd":"/app","tool_name":"Read","action":"deny","reason":"reading .env files may leak secrets"}
+{"ts":"2026-07-01T10:00:00Z","host":"claude","session_id":"abc123","cwd":"/app","tool_name":"Bash","cmd":"git push --force origin main","action":"deny","reason":"force-push rewrites remote history"}
+{"ts":"2026-07-01T10:00:05Z","host":"codex","session_id":"abc123","cwd":"/app","tool_name":"apply_patch","cmd":"*** Begin Patch\n*** Add File: foo/.env\n...","action":"deny","reason":"env file read denied"}
 ```
 
-`cmd` is only populated for Bash and PowerShell tool calls.
+`host` identifies the agent CLI (`"claude"` or `"codex"`). `cmd` is populated
+for Bash, PowerShell, and `apply_patch` tool calls.
 
 Parse with `jq`:
 
@@ -275,6 +332,9 @@ jq 'select(.action=="deny")' ~/.claude/hookguard-audit.jsonl
 
 # Summary by action
 jq -r '.action' ~/.claude/hookguard-audit.jsonl | sort | uniq -c
+
+# Only Codex calls
+jq 'select(.host=="codex")' ~/.claude/hookguard-audit.jsonl
 ```
 
 ---
@@ -334,25 +394,25 @@ and adding `cmdlet:` rules for anything you want to control beyond
 make test     # run all unit tests
 make lint     # requires golangci-lint
 
-# Manually test the hook by piping example Claude Code JSON:
+# Manually test the hook:
 echo '{"tool_name":"Bash","tool_input":{"command":"git push --force origin main"}}' \
-  | HOOKGUARD_POLICY=config/hookguard.yaml ./hookguard | jq .
+  | HOOKGUARD_POLICY=config/hookguard.yaml ./hookguard claude | jq .
 
-echo '{"tool_name":"Read","tool_input":{"file_path":"/app/.env"}}' \
-  | HOOKGUARD_POLICY=config/hookguard.yaml ./hookguard | jq .
+echo '{"tool_name":"Bash","tool_input":{"command":"git push --force origin main"}}' \
+  | HOOKGUARD_POLICY=config/hookguard.yaml ./hookguard codex | jq .
 
-echo '{"tool_name":"PowerShell","tool_input":{"command":"Remove-Item -Recurse -Force C:\\"}}' \
-  | HOOKGUARD_POLICY=config/hookguard.yaml ./hookguard | jq .
+echo '{"tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Add File: foo/.env\n+secret\n*** End Patch"}}' \
+  | HOOKGUARD_POLICY=config/hookguard.yaml ./hookguard codex | jq .
 ```
 
-Expected output for the first command:
+Expected output for the Codex force-push command (ask rule downgraded to deny):
 
 ```json
 {
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "permissionDecision": "deny",
-    "permissionDecisionReason": "force-push rewrites remote history and bypasses branch protections"
+    "permissionDecisionReason": "ask downgraded to deny (Codex has no ask channel): ..."
   }
 }
 ```
@@ -363,7 +423,7 @@ Expected output for the first command:
 
 ```
 hookguard/
-├── cmd/hookguard/main.go            # entry point: stdin→decision→stdout
+├── cmd/hookguard/main.go            # entry point: parseHost → decide → stdout
 ├── internal/
 │   ├── shell/
 │   │   ├── tokenizer.go            # Bash command parser (mvdan.cc/sh)
@@ -371,15 +431,19 @@ hookguard/
 │   ├── powershell/
 │   │   ├── parser.go               # hand-written PowerShell 7+ tokenizer
 │   │   └── parser_test.go
+│   ├── patch/
+│   │   ├── parser.go               # Codex apply_patch → Patch-Segment parser
+│   │   └── parser_test.go
 │   ├── policy/
 │   │   ├── policy.go               # Rule/Policy types, Load, Evaluate
 │   │   ├── cel_env.go              # CEL environment + glob() function
 │   │   ├── sugar.go                # sugar-field validation + CEL compilation
 │   │   └── policy_test.go
 │   └── audit/
-│       └── audit.go                # append-only JSONL logger
+│       ├── audit.go                # append-only JSONL logger
+│       └── audit_test.go
 ├── config/
-│   └── hookguard.yaml              # example policy (copy to ~/.claude/)
+│   └── hookguard.yaml              # example policy (copy to ~/.claude/ or ~/.codex/)
 ├── Makefile
 └── README.md
 ```

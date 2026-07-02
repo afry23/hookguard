@@ -14,12 +14,14 @@ import (
 type Entry struct {
 	// Timestamp is set automatically to UTC now if zero.
 	Timestamp time.Time `json:"ts"`
-	SessionID string    `json:"session_id,omitempty"`
-	Cwd       string    `json:"cwd,omitempty"`
-	// ToolName is the Claude Code tool invoked, e.g. "Bash", "Read", "Edit".
+	// Host is which agent CLI invoked hookguard: "claude" or "codex".
+	Host      string `json:"host,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	Cwd       string `json:"cwd,omitempty"`
+	// ToolName is the tool invoked, e.g. "Bash", "Read", "Edit", "apply_patch".
 	ToolName string `json:"tool_name,omitempty"`
-	// Command is the raw shell command string passed by Claude Code.
-	// Only set for Bash tool calls.
+	// Command is the raw shell/patch command string. Set for Bash, PowerShell,
+	// and apply_patch tool calls.
 	Command string `json:"cmd,omitempty"`
 	// Action is the decision: "allow", "deny", or "ask".
 	Action string `json:"action"`
