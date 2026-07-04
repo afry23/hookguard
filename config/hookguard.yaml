@@ -44,6 +44,14 @@ opaque_execution_guard:
 powershell_opaque_execution_guard:
   action: ask
 
+# Fired when a Codex apply_patch call's raw patch text cannot be safely
+# decomposed into Patch-Segments (missing *** Begin Patch / *** End Patch
+# envelope, unrecognized *** headers, content before first section header,
+# etc).  Under Codex, an "ask" response is automatically downgraded to "deny"
+# since Codex has no interactive ask channel — see ADR 0006.
+patch_opaque_execution_guard:
+  action: ask
+
 rules:
 
   # ── git ──────────────────────────────────────────────────────────────────

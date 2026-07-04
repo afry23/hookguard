@@ -17,6 +17,11 @@ func newCELEnv() (*cel.Env, error) {
 		cel.Variable("ps_segment", cel.DynType),
 		cel.Variable("cwd", cel.StringType),
 		cel.Variable("session_id", cel.StringType),
+		cel.Variable("model", cel.StringType),
+		cel.Variable("permission_mode", cel.StringType),
+		cel.Variable("turn_id", cel.StringType),
+		cel.Variable("tool_use_id", cel.StringType),
+		cel.Variable("transcript_path", cel.StringType),
 
 		cel.Function("glob",
 			cel.Overload("glob_string_string", []*cel.Type{cel.StringType, cel.StringType}, cel.BoolType,

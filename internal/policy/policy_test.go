@@ -512,8 +512,8 @@ rules:
 }
 
 func TestLoad_SecureDefaults(t *testing.T) {
-	// An empty policy must still default to deny and ask-on-opaque for both
-	// Bash and PowerShell.
+	// An empty policy must still default to deny and ask-on-opaque for Bash,
+	// PowerShell, and patch.
 	tmp := filepath.Join(t.TempDir(), "hookguard.yaml")
 	_ = os.WriteFile(tmp, []byte("version: 1\n"), 0o644)
 	p, err := policy.Load(tmp)
@@ -529,5 +529,82 @@ func TestLoad_SecureDefaults(t *testing.T) {
 	}
 	if p.PowerShellOpaqueGuard.Action != policy.ActionAsk {
 		t.Errorf("powershell_opaque_execution_guard should default to ask, got %s", p.PowerShellOpaqueGuard.Action)
+	}
+	if p.PatchOpaqueGuard.Action != policy.ActionAsk {
+		t.Errorf("patch_opaque_execution_guard should default to ask, got %s", p.PatchOpaqueGuard.Action)
+	}
+}
+
+// ─── PatchOpaqueGuard ────────────────────────────────────────────────────────
+
+func TestLoad_PatchOpaqueGuard_ExplicitDeny(t *testing.T) {
+	yaml := `
+version: 1
+patch_opaque_execution_guard:
+  action: deny
+`
+	tmp := filepath.Join(t.TempDir(), "hookguard.yaml")
+	_ = os.WriteFile(tmp, []byte(yaml), 0o644)
+	p, err := policy.Load(tmp)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if p.PatchOpaqueGuard.Action != policy.ActionDeny {
+		t.Errorf("want deny, got %s", p.PatchOpaqueGuard.Action)
+	}
+}
+
+// ─── Codex-only CEL variables ─────────────────────────────────────────────────
+
+func TestEvaluate_CodexVar_PermissionMode(t *testing.T) {
+	yaml := `
+version: 1
+default_action: allow
+rules:
+  - when: 'permission_mode == "auto"'
+    action: ask
+    reason: "auto mode"
+`
+	tmp := filepath.Join(t.TempDir(), "hookguard.yaml")
+	_ = os.WriteFile(tmp, []byte(yaml), 0o644)
+	p, err := policy.Load(tmp)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	r := p.Evaluate(policy.Activation{
+		ToolName:       "Bash",
+		ToolInput:      map[string]any{},
+		PermissionMode: "auto",
+	})
+	if r.Action != policy.ActionAsk {
+		t.Errorf("want ask for permission_mode==auto, got %s", r.Action)
+	}
+}
+
+func TestEvaluate_CodexVars_DefaultToEmptyString(t *testing.T) {
+	// Codex-only vars default to "" when not set; rule must not cause a runtime
+	// error and must fall through to default_action (allow).
+	yaml := `
+version: 1
+default_action: allow
+rules:
+  - when: 'permission_mode == "auto"'
+    action: deny
+`
+	tmp := filepath.Join(t.TempDir(), "hookguard.yaml")
+	_ = os.WriteFile(tmp, []byte(yaml), 0o644)
+	p, err := policy.Load(tmp)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// No PermissionMode set → defaults to "" → rule does not match → allow.
+	r := p.Evaluate(policy.Activation{
+		ToolName:  "Bash",
+		ToolInput: map[string]any{},
+	})
+	if r.Action != policy.ActionAllow {
+		t.Errorf("want allow when Codex vars are zero-value, got %s: %s", r.Action, r.Reason)
 	}
 }

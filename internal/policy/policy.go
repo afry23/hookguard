@@ -101,6 +101,11 @@ type Policy struct {
 	// profiles -- see docs/adr/0005-hand-written-powershell-tokenizer.md.
 	// Defaults to "ask" when empty.
 	PowerShellOpaqueGuard OpaqueGuard `yaml:"powershell_opaque_execution_guard"`
+
+	// PatchOpaqueGuard controls the decision when a Codex apply_patch call's
+	// raw patch text cannot be safely decomposed into Patch-Segments.
+	// Defaults to "ask" when empty.
+	PatchOpaqueGuard OpaqueGuard `yaml:"patch_opaque_execution_guard"`
 }
 
 // OpaqueGuard controls what happens when an opaque execution construct is
@@ -112,7 +117,7 @@ type OpaqueGuard struct {
 // ─── Activation / EvalResult ─────────────────────────────────────────────────
 
 // Activation carries the variables available to rule evaluation for exactly
-// one tool call (or one Bash segment within a tool call).
+// one tool call (or one Bash/PowerShell/Patch segment within a tool call).
 type Activation struct {
 	ToolName  string
 	ToolInput map[string]any
@@ -120,6 +125,14 @@ type Activation struct {
 	SessionID string
 	Segment   *shell.Segment      // nil for non-Bash tool calls
 	PSSegment *powershell.Segment // nil for non-PowerShell tool calls
+
+	// Codex-only fields; empty string for Claude Code invocations.
+	// Only usable via raw when: expressions — not exposed through sugar fields.
+	Model          string
+	PermissionMode string
+	TurnID         string
+	ToolUseID      string
+	TranscriptPath string
 }
 
 // EvalResult is the outcome of evaluating one Activation.
@@ -154,6 +167,9 @@ func Load(path string) (*Policy, error) {
 	}
 	if p.PowerShellOpaqueGuard.Action == "" {
 		p.PowerShellOpaqueGuard.Action = ActionAsk
+	}
+	if p.PatchOpaqueGuard.Action == "" {
+		p.PatchOpaqueGuard.Action = ActionAsk
 	}
 
 	env, err := newCELEnv()
@@ -190,12 +206,17 @@ func (p *Policy) Evaluate(a Activation) EvalResult {
 		}
 
 		vars := map[string]any{
-			"tool_name":  a.ToolName,
-			"tool_input": toolInputToMap(a.ToolInput),
-			"segment":    segMap,
-			"ps_segment": psSegMap,
-			"cwd":        a.Cwd,
-			"session_id": a.SessionID,
+			"tool_name":       a.ToolName,
+			"tool_input":      toolInputToMap(a.ToolInput),
+			"segment":         segMap,
+			"ps_segment":      psSegMap,
+			"cwd":             a.Cwd,
+			"session_id":      a.SessionID,
+			"model":           a.Model,
+			"permission_mode": a.PermissionMode,
+			"turn_id":         a.TurnID,
+			"tool_use_id":     a.ToolUseID,
+			"transcript_path": a.TranscriptPath,
 		}
 
 		out, _, err := r.program.Eval(vars)

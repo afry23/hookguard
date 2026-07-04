@@ -55,6 +55,43 @@ control structures). Configured and evaluated separately from the Bash
 implementations with independent risk profiles.
 _Avoid_: Opaque execution guard (reserved for Bash), escape hatch
 
+**Host**:
+The agent CLI that issued a tool call and invoked hookguard as its hook —
+`claude` or `codex`. Determined by which hookguard subcommand was invoked
+(`hookguard claude` vs `hookguard codex`), not by sniffing the request body.
+Governs host-specific behavior: the **Ask-to-deny downgrade**, which parser
+handles a `Bash`-named call on Windows, and which Codex-only fields are
+available to **When-expressions**.
+_Avoid_: Client, agent, CLI
+
+**Ask-to-deny downgrade**:
+Codex has no `ask` channel (it can only `allow` or `deny` a tool call), so
+when a **Rule** resolves to `ask` for a call from the Codex **Host**,
+hookguard reports `deny` instead, with a reason noting the downgrade. Does
+not apply to the Claude Code **Host**, which supports `ask` natively.
+_Avoid_: Ask fallback, ask override
+
+**Patch-Segment**:
+One parsed file operation (Add File, Update File, Delete File, or Move To)
+extracted from a Codex `apply_patch` call's raw patch text. The `apply_patch`
+analogue of a **Segment** — an `apply_patch` call is decomposed into
+Patch-Segments the same way a Bash command is decomposed into Segments, and
+each is evaluated against path-based **Rules** independently, with the most
+severe result across all of them winning. Update File and Delete File
+Patch-Segments are evaluated as **Edit**; Add File and the destination side
+of Move To are evaluated as **Write**; Move To also produces an Edit-shaped
+Patch-Segment for its source path.
+_Avoid_: Patch operation, file change
+
+**Patch opaque guard**:
+The `apply_patch` analogue of the **Opaque execution guard**: fires when a
+Codex `apply_patch` call's raw patch text cannot be safely decomposed into
+**Patch-Segments** (malformed patch, unrecognized format, ambiguous paths).
+Configured and evaluated separately from the Bash and PowerShell opaque
+guards.
+_Avoid_: Opaque execution guard (reserved for Bash), PowerShell opaque guard
+(reserved for PowerShell)
+
 **Sugar field**:
 A shorthand YAML field on a **Rule** (`tool`, `subcommand`, `deny_flags`,
 `tools`, `path`) that compiles deterministically to an equivalent CEL
@@ -106,6 +143,15 @@ _Avoid_: Escape hatch, unsafe command
   *before* rule matching for PowerShell calls that can't be split into
   **PowerShell-Segments**, mirroring the **Opaque execution guard**'s role
   for Bash.
+- Every tool call has exactly one **Host** (`claude` or `codex`), fixed for
+  the whole hookguard invocation.
+- An `apply_patch` call (Codex **Host** only) is decomposed into
+  **Patch-Segments** the same way a Bash command is decomposed into
+  **Segments**; the **Patch opaque guard** applies *before* rule matching for
+  `apply_patch` calls that can't be split into **Patch-Segments**.
+- The **Ask-to-deny downgrade** applies only to the Codex **Host**, after a
+  **Rule**'s action has already been resolved to `ask` — it never affects the
+  Claude Code **Host**.
 
 ## Example dialogue
 
