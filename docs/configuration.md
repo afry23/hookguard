@@ -2,6 +2,8 @@
 
 hookguard is controlled by a single YAML file. Every top-level key is described below.
 
+For the full list of recognized `tool_name` values (`Bash`, `Read`, `apply_patch`, …) and what each `tool:`/`cmdlet:`/`tools:` value means, see [tool-names.md](tool-names.md).
+
 ## File location
 
 hookguard resolves the policy path in this order:

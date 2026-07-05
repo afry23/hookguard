@@ -10,6 +10,7 @@
 //	hookguard              # Claude Code (default)
 //	hookguard claude       # Claude Code (explicit)
 //	hookguard codex        # Codex CLI
+//	hookguard test <file>  # run a testfile of Tool: Value -> decision cases
 //
 // The binary is designed to be invoked once per tool call.  Start-up time is
 // in the low single-digit milliseconds (no interpreter, no runtime warm-up).
@@ -86,6 +87,9 @@ type hookSpecificOutput struct {
 // ─── main ────────────────────────────────────────────────────────────────────
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "test" {
+		os.Exit(runTestMode(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	runHook(parseHost(os.Args))
 }
 

@@ -85,6 +85,9 @@ Expected output for the force-push test:
 }
 ```
 
+To check a whole collection of expected decisions at once instead of piping
+JSON by hand, use `hookguard test <testfile>` — see [testing.md](testing.md).
+
 ## Key properties
 
 **Severity wins, not order.** When multiple rules match a single tool call, the most restrictive action wins (`deny > ask > allow`) regardless of the rules' position in the file.
