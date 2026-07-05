@@ -187,6 +187,9 @@ never silently resolve to `allow`. Compile-time errors (bad CEL syntax,
 malformed glob patterns, invalid sugar-field combinations) fail `Load()`
 immediately.
 
+Full reference for every recognized `tool_name` value and what `tool:` /
+`cmdlet:` / `tools:` can be set to: [docs/tool-names.md](docs/tool-names.md).
+
 #### Ask-to-deny downgrade (Codex)
 
 Codex CLI has no interactive ask channel. When hookguard is invoked as
@@ -271,6 +274,7 @@ Set `HOOKGUARD_POLICY` to share a single file between Claude Code and Codex.
 | `hookguard` | Claude Code | `~/.claude/hookguard.yaml` |
 | `hookguard claude` | Claude Code | `~/.claude/hookguard.yaml` |
 | `hookguard codex` | Codex CLI | `~/.codex/hookguard.yaml` |
+| `hookguard test <file>` | n/a (test mode) | `~/.claude/hookguard.yaml` unless `--policy`/`--host` given — see [docs/testing.md](docs/testing.md) |
 
 ---
 

@@ -110,6 +110,20 @@ of the rules' order in the file.
 _Avoid_: Priority — priority implies order-dependence, which this project
 deliberately rejected (see ADR 0004)
 
+**Test file**:
+A plain-text file consumed by `hookguard test <file>`: one **Test case** per
+non-comment, non-blank line (`Tool: Value -> decision`), validated as a whole
+before any case runs — a malformed line aborts the run instead of letting
+valid cases pass alongside a silently-skipped broken one.
+_Avoid_: Test suite, fixture
+
+**Test case**:
+One parsed line of a **Test file** — a tool name, a value (mapped to the
+matching `tool_input` field), and an expected **Action**. Evaluated through
+the same `decide()` path as a real hook call for a given **Host**, and
+reported as PASS or FAIL against the expected action.
+_Avoid_: Assertion, expectation
+
 **Default action**:
 The top-level fallback action applied when *no* **Rule** in the list matches
 a given tool call. A distinct mechanism from a **Rule** — it fires on the
@@ -155,15 +169,15 @@ _Avoid_: Escape hatch, unsafe command
 
 ## Example dialogue
 
-> **Dev:** "Wenn ich eine Regel für `git push --force` schreibe, ist das ein
-> Segment-Match oder ein When-Expression?"
-> **Domain expert:** "Ein Sugar-Field-Match — `tool: git`, `subcommand:
-> push`, `deny_flags: [--force]` kompiliert intern zu genau der
-> When-Expression, die du sonst von Hand schreiben müsstest."
+> **Dev:** "If I write a rule for `git push --force`, is that a segment match
+> or a when-expression?"
+> **Domain expert:** "A sugar-field match — `tool: git`, `subcommand:
+> push`, `deny_flags: [--force]` compiles internally to exactly the
+> when-expression you'd otherwise have to write by hand."
 >
-> **Dev:** "Und wenn zwei Regeln beide matchen, eine sagt allow, eine deny?"
-> **Domain expert:** "Severity entscheidet, nicht die Reihenfolge — deny
-> gewinnt immer, unabhängig davon, wo die Regel in der Liste steht."
+> **Dev:** "And if two rules both match, one says allow, one says deny?"
+> **Domain expert:** "Severity decides, not order — deny always wins,
+> regardless of where the rule sits in the list."
 
 ## Flagged ambiguities
 
