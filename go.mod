@@ -4,7 +4,7 @@ go 1.23.0
 
 require (
 	github.com/bmatcuk/doublestar/v4 v4.10.0
-	github.com/google/cel-go v0.28.1
+	github.com/google/cel-go v0.29.0
 	gopkg.in/yaml.v3 v3.0.1
 	mvdan.cc/sh/v3 v3.9.0
 )
