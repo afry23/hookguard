@@ -206,8 +206,22 @@ func TestParse_OpaqueVariableInArg(t *testing.T) {
 	assertOpaque(t, mustParse(t, "git push $REMOTE"))
 }
 
-func TestParse_OpaqueSubshell(t *testing.T) {
-	assertOpaque(t, mustParse(t, "git push --force && (cd /tmp && rm -rf .)"))
+// Subshells are not opaque: the parser walks into them, so every inner command
+// still reaches policy evaluation as its own segment.
+func TestParse_SubshellIsDecomposed(t *testing.T) {
+	r := mustParse(t, "git push --force && (cd /tmp && rm -rf .)")
+	assertNotOpaque(t, r)
+	if len(r.Segments) != 3 {
+		t.Fatalf("expected 3 segments, got %d: %+v", len(r.Segments), r.Segments)
+	}
+	for i, tool := range []string{"git", "cd", "rm"} {
+		if r.Segments[i].Tool != tool {
+			t.Errorf("segment %d: tool = %q, want %q", i, r.Segments[i].Tool, tool)
+		}
+	}
+	if !hasFlag(r.Segments[2].Flags, "-r") || !hasFlag(r.Segments[2].Flags, "-f") {
+		t.Errorf("rm segment lost its flags: %+v", r.Segments[2])
+	}
 }
 
 // ─── sh without -c is NOT opaque ────────────────────────────────────────────
