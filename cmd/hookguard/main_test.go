@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"hookguard/internal/policy"
+	"github.com/afry23/hookguard/internal/policy"
 )
 
 func loadTestPolicy(t *testing.T, yamlContent string) *policy.Policy {

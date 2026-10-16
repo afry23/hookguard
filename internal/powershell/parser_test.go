@@ -3,7 +3,7 @@ package powershell_test
 import (
 	"testing"
 
-	"hookguard/internal/powershell"
+	"github.com/afry23/hookguard/internal/powershell"
 )
 
 func mustParse(t *testing.T, cmd string) *powershell.ParseResult {

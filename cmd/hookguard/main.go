@@ -23,11 +23,11 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"hookguard/internal/audit"
-	"hookguard/internal/patch"
-	"hookguard/internal/policy"
-	"hookguard/internal/powershell"
-	"hookguard/internal/shell"
+	"github.com/afry23/hookguard/internal/audit"
+	"github.com/afry23/hookguard/internal/patch"
+	"github.com/afry23/hookguard/internal/policy"
+	"github.com/afry23/hookguard/internal/powershell"
+	"github.com/afry23/hookguard/internal/shell"
 )
 
 // goos is indirected through a package var so tests can simulate Windows on

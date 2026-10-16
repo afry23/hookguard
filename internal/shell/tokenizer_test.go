@@ -3,7 +3,7 @@ package shell_test
 import (
 	"testing"
 
-	"hookguard/internal/shell"
+	"github.com/afry23/hookguard/internal/shell"
 )
 
 // ─── helpers ────────────────────────────────────────────────────────────────

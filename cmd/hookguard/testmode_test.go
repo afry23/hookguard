@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"hookguard/internal/policy"
+	"github.com/afry23/hookguard/internal/policy"
 )
 
 // ─── parseTestLine ────────────────────────────────────────────────────────────

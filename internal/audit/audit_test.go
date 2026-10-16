@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"hookguard/internal/audit"
+	"github.com/afry23/hookguard/internal/audit"
 )
 
 func TestWrite_RoundTrip_WithHost(t *testing.T) {

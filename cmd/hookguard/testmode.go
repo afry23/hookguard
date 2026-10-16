@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"hookguard/internal/policy"
+	"github.com/afry23/hookguard/internal/policy"
 )
 
 // supportedTestTools lists the tool names accepted by hookguard test testfile

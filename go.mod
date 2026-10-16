@@ -1,4 +1,4 @@
-module hookguard
+module github.com/afry23/hookguard
 
 go 1.23.0
 

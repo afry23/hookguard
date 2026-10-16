@@ -3,7 +3,7 @@ package patch_test
 import (
 	"testing"
 
-	"hookguard/internal/patch"
+	"github.com/afry23/hookguard/internal/patch"
 )
 
 func TestParse_SingleAdd(t *testing.T) {

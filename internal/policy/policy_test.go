@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"hookguard/internal/policy"
-	"hookguard/internal/powershell"
-	"hookguard/internal/shell"
+	"github.com/afry23/hookguard/internal/policy"
+	"github.com/afry23/hookguard/internal/powershell"
+	"github.com/afry23/hookguard/internal/shell"
 )
 
 // ─── shared test policy ──────────────────────────────────────────────────────

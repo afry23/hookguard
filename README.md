@@ -57,7 +57,7 @@ Claude Code / Codex CLI (PreToolUse: Bash / PowerShell / apply_patch / Read / Ed
 **Prerequisites:** Go 1.23+
 
 ```bash
-git clone https://github.com/yourorg/hookguard
+git clone https://github.com/afry23/hookguard
 cd hookguard
 
 make install          # builds + installs to /usr/local/bin/hookguard

@@ -273,7 +273,7 @@ branching needed at decode time.
 - Audit entry gains `Host: string(h)`, and the `Command`-population condition
   extends to `input.ToolName == "apply_patch"` alongside `Bash`/`PowerShell`.
 
-New imports: `"runtime"`, `"hookguard/internal/patch"`.
+New imports: `"runtime"`, `"github.com/afry23/hookguard/internal/patch"`.
 
 ### Tests: `cmd/hookguard/main_test.go`
 Update all existing `decide(input, pol)` calls to `decide(input, pol, hostClaude)`.

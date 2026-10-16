@@ -12,8 +12,8 @@ import (
 	"github.com/google/cel-go/cel"
 	"gopkg.in/yaml.v3"
 
-	"hookguard/internal/powershell"
-	"hookguard/internal/shell"
+	"github.com/afry23/hookguard/internal/powershell"
+	"github.com/afry23/hookguard/internal/shell"
 )
 
 // ─── action type ─────────────────────────────────────────────────────────────
