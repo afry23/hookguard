@@ -1,0 +1,49 @@
+name: Bug report
+description: hookguard makes a wrong decision or crashes
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For security problems (a policy bypass) please use a private
+        [security advisory](https://github.com/afry23/hookguard/security/advisories/new)
+        instead of a public issue.
+  - type: input
+    id: version
+    attributes:
+      label: hookguard version
+      description: Release tag or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: Host
+      options: [claude, codex]
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: macOS 15 arm64, Ubuntu 24.04, Windows 11, ...
+  - type: textarea
+    id: input
+    attributes:
+      label: Hook input
+      description: The JSON that hookguard receives on stdin
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: policy
+    attributes:
+      label: Policy
+      description: The relevant part of your hookguard.yaml
+      render: yaml
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs. actual decision
+    validations:
+      required: true
