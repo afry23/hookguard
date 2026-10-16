@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test -count=1 ./...
+
+      - name: Build archives
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            goos=${target%/*}
+            goarch=${target#*/}
+            name="hookguard_${GITHUB_REF_NAME}_${goos}_${goarch}"
+            bin=hookguard
+            [ "$goos" = windows ] && bin=hookguard.exe
+
+            mkdir -p "build/$name"
+            CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch \
+              go build -trimpath -ldflags="-s -w" -o "build/$name/$bin" ./cmd/hookguard
+            cp LICENSE "build/$name/"
+
+            if [ "$goos" = windows ]; then
+              (cd build && zip -qr "../dist/$name.zip" "$name")
+            else
+              tar -C build -czf "dist/$name.tar.gz" "$name"
+            fi
+          done
+          ls -l dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
