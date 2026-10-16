@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -40,13 +41,22 @@ func compileRule(r *Rule, env *cel.Env) error {
 	}
 
 	if len(r.Tools) > 0 {
-		parts = append(parts, fmt.Sprintf(`tool_name in %s`, quotedList(r.Tools)))
+		expr, err := toolsExpr(r.Tools)
+		if err != nil {
+			return err
+		}
+		parts = append(parts, expr)
 		if r.Path != "" {
-			if _, err := doublestar.Match(r.Path, ""); err != nil {
-				return fmt.Errorf("invalid glob pattern %q: %w", r.Path, err)
+			if !doublestar.ValidatePattern(r.Path) {
+				return fmt.Errorf("invalid glob pattern %q", r.Path)
 			}
 			parts = append(parts, fmt.Sprintf(`glob(tool_input.file_path, %q)`, r.Path))
 		}
+		inputParts, err := inputExprs(r.Input)
+		if err != nil {
+			return err
+		}
+		parts = append(parts, inputParts...)
 	}
 
 	if r.When != "" {
@@ -66,7 +76,7 @@ func compileRule(r *Rule, env *cel.Env) error {
 	}
 
 	r.program = prg
-	r.scopeTools = scopeToolsFor(r)
+	r.scopeMatch = scopeMatchFor(r)
 	return nil
 }
 
@@ -91,31 +101,108 @@ func validateRule(r *Rule) error {
 	if r.Path != "" && len(r.Tools) == 0 {
 		return fmt.Errorf("rule sets `path` without `tools`")
 	}
+	if len(r.Input) > 0 && len(r.Tools) == 0 {
+		return fmt.Errorf("rule sets `input` without `tools`")
+	}
+	switch r.OnError {
+	case "", "ask", "skip":
+	default:
+		return fmt.Errorf("invalid on_error %q (want ask or skip)", r.OnError)
+	}
 	if r.Tool == "" && r.Cmdlet == "" && len(r.Tools) == 0 && r.When == "" {
 		return fmt.Errorf("rule has no condition (no `tool`, `cmdlet`, `tools`, or `when`)")
 	}
 	return nil
 }
 
-// scopeToolsFor derives the set of tool_name values a rule can possibly
-// match, used to skip CEL evaluation entirely for irrelevant tool calls.
-// Returns nil (meaning "evaluate for every tool_name") for raw when-only
-// rules, since we cannot statically determine their scope.
-func scopeToolsFor(r *Rule) map[string]bool {
+// scopeMatchFor derives a predicate over tool_name values the rule can
+// possibly match, used to skip CEL evaluation entirely for irrelevant tool
+// calls. Returns nil (meaning "evaluate for every tool_name") for raw
+// when-only rules, since we cannot statically determine their scope.
+func scopeMatchFor(r *Rule) func(string) bool {
 	switch {
 	case r.Tool != "":
-		return map[string]bool{"Bash": true}
+		return func(name string) bool { return name == "Bash" }
 	case r.Cmdlet != "":
-		return map[string]bool{"PowerShell": true}
+		return func(name string) bool { return name == "PowerShell" }
 	case len(r.Tools) > 0:
-		set := make(map[string]bool, len(r.Tools))
-		for _, t := range r.Tools {
-			set[t] = true
+		tools := append([]string(nil), r.Tools...)
+		return func(name string) bool {
+			for _, t := range tools {
+				if toolPatternMatches(t, name) {
+					return true
+				}
+			}
+			return false
 		}
-		return set
 	default:
 		return nil
 	}
+}
+
+// isGlob reports whether a tools: entry contains glob metacharacters.
+func isGlob(s string) bool {
+	return strings.ContainsAny(s, "*?[{")
+}
+
+// toolPatternMatches matches a tool_name against a tools: entry, which is
+// either an exact name or a glob such as "mcp__github__*".
+func toolPatternMatches(pattern, name string) bool {
+	if !isGlob(pattern) {
+		return pattern == name
+	}
+	ok, err := doublestar.Match(pattern, name)
+	return err == nil && ok
+}
+
+// toolsExpr renders the CEL condition for a tools: list: exact names become
+// an `in` test, glob entries become glob() calls, all ORed together.
+func toolsExpr(tools []string) (string, error) {
+	var exact []string
+	var alts []string
+	for _, t := range tools {
+		if !isGlob(t) {
+			exact = append(exact, t)
+			continue
+		}
+		if !doublestar.ValidatePattern(t) {
+			return "", fmt.Errorf("invalid glob pattern %q in tools", t)
+		}
+		alts = append(alts, fmt.Sprintf(`glob(tool_name, %q)`, t))
+	}
+	if len(exact) > 0 {
+		alts = append([]string{fmt.Sprintf(`tool_name in %s`, quotedList(exact))}, alts...)
+	}
+	return "(" + strings.Join(alts, " || ") + ")", nil
+}
+
+// inputExprs renders one CEL condition per input: key. A missing key makes
+// the condition false (the rule simply does not apply) instead of raising a
+// runtime error. Values are compared as strings, so numbers and booleans can
+// be matched too.
+func inputExprs(input map[string]StringList) ([]string, error) {
+	keys := make([]string, 0, len(input))
+	for k := range input {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var out []string
+	for _, k := range keys {
+		pats := input[k]
+		if len(pats) == 0 {
+			return nil, fmt.Errorf("input key %q has no patterns", k)
+		}
+		alts := make([]string, len(pats))
+		for i, p := range pats {
+			if !doublestar.ValidatePattern(p) {
+				return nil, fmt.Errorf("invalid glob pattern %q for input key %q", p, k)
+			}
+			alts[i] = fmt.Sprintf(`input_glob(tool_input[%q], %q)`, k, p)
+		}
+		out = append(out, fmt.Sprintf(`(%q in tool_input && (%s))`, k, strings.Join(alts, " || ")))
+	}
+	return out, nil
 }
 
 // quotedList renders a Go string slice as a CEL list literal of double-quoted

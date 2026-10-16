@@ -93,6 +93,7 @@ shared between both hosts by setting `HOOKGUARD_POLICY` to a common path.
 version: 1
 default_action: deny          # fallback when no rule matches
 audit_log: ~/.claude/hookguard-audit.jsonl
+audit_tool_input: false        # also log tool_input (e.g. MCP arguments); may contain secrets
 
 opaque_execution_guard:
   action: ask                  # eval / sh -c / $(...) → ask user
@@ -127,6 +128,15 @@ rules:
     path: "**/.env*"
     action: deny
     reason: "reading .env files may leak secrets"
+
+  # MCP tools (Claude Code: mcp__<server>__<tool>): `tools` accepts globs and
+  # `input` constrains single tool_input keys. Unlisted keys are ignored, a
+  # missing key means the rule does not apply. See docs/configuration.md#mcp-tools.
+  - tools: ["mcp__github__create_*"]
+    input:
+      owner: ["secret-org", "archive"]
+    action: deny
+    reason: "no changes in protected organisations"
 
   # Raw `when:` — a CEL boolean expression, used when sugar isn't expressive
   # enough. ANDed with any sugar fields present on the same rule.
@@ -183,7 +193,8 @@ pattern)`.
 A CEL **runtime error** in a rule (e.g. accessing a field absent for the
 current tool) escalates that rule to action `ask` — it still participates in
 severity resolution (so a `deny` elsewhere still wins), but the error can
-never silently resolve to `allow`. Compile-time errors (bad CEL syntax,
+never silently resolve to `allow` (a rule can opt out with `on_error: skip`).
+Compile-time errors (bad CEL syntax,
 malformed glob patterns, invalid sugar-field combinations) fail `Load()`
 immediately.
 

@@ -23,10 +23,52 @@ type Entry struct {
 	// Command is the raw shell/patch command string. Set for Bash, PowerShell,
 	// and apply_patch tool calls.
 	Command string `json:"cmd,omitempty"`
+	// ToolInput is the tool call's input, truncated by TruncateInput. Only set
+	// when the policy enables audit_tool_input, and not for tools that already
+	// record their command in Command.
+	ToolInput map[string]any `json:"tool_input,omitempty"`
 	// Action is the decision: "allow", "deny", or "ask".
 	Action string `json:"action"`
 	// Reason is the human-readable explanation for deny / ask decisions.
 	Reason string `json:"reason,omitempty"`
+}
+
+// maxInputValueRunes bounds each string value logged in Entry.ToolInput so a
+// single record stays well below PIPE_BUF (see Write).
+const maxInputValueRunes = 256
+
+// TruncateInput returns a copy of in with every string value (including those
+// nested in maps and lists) cut to maxInputValueRunes runes.
+func TruncateInput(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = truncateValue(v)
+	}
+	return out
+}
+
+func truncateValue(v any) any {
+	switch t := v.(type) {
+	case string:
+		r := []rune(t)
+		if len(r) > maxInputValueRunes {
+			return string(r[:maxInputValueRunes]) + "…(truncated)"
+		}
+		return t
+	case map[string]any:
+		return TruncateInput(t)
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = truncateValue(e)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // Write appends a JSON-encoded Entry (followed by a newline) to the file at

@@ -127,6 +127,8 @@ func runHook(h host) {
 		}
 		if input.ToolName == "Bash" || input.ToolName == "PowerShell" || input.ToolName == "apply_patch" {
 			entry.Command, _ = input.ToolInput["command"].(string)
+		} else if pol.AuditToolInput {
+			entry.ToolInput = audit.TruncateInput(input.ToolInput)
 		}
 		_ = audit.Write(pol.AuditLog, entry)
 	}

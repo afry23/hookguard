@@ -608,3 +608,223 @@ rules:
 		t.Errorf("want allow when Codex vars are zero-value, got %s: %s", r.Action, r.Reason)
 	}
 }
+
+// ─── MCP tools: wildcards, input sugar, on_error ─────────────────────────────
+
+func loadYAML(t *testing.T, yaml string) *policy.Policy {
+	t.Helper()
+	tmp := filepath.Join(t.TempDir(), "hookguard.yaml")
+	if err := os.WriteFile(tmp, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+	p, err := policy.Load(tmp)
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+	return p
+}
+
+func evalTool(p *policy.Policy, tool string, input map[string]any) policy.Action {
+	return p.Evaluate(policy.Activation{ToolName: tool, ToolInput: input}).Action
+}
+
+const mcpPolicyYAML = `
+version: 1
+default_action: deny
+rules:
+  - tools: ["mcp__github__get_*", "mcp__github__list_*"]
+    action: allow
+
+  - tools: ["mcp__github__create_issue"]
+    action: allow
+
+  - tools: ["mcp__github__create_issue"]
+    input:
+      repo: ["secret-org/*", "archive/*"]
+    action: deny
+    reason: "no issues in protected orgs"
+
+  - tools: ["mcp__fs__*"]
+    input:
+      path: "/etc/**"
+    action: deny
+
+  - tools: ["mcp__db__query"]
+    input:
+      limit: "0"
+    action: ask
+`
+
+func TestToolsWildcard_MatchesPrefix(t *testing.T) {
+	p := loadYAML(t, mcpPolicyYAML)
+	for _, tool := range []string{"mcp__github__get_issue", "mcp__github__list_prs"} {
+		if got := evalTool(p, tool, map[string]any{}); got != policy.ActionAllow {
+			t.Errorf("%s: want allow, got %s", tool, got)
+		}
+	}
+}
+
+func TestToolsWildcard_DoesNotMatchOtherTools(t *testing.T) {
+	p := loadYAML(t, mcpPolicyYAML)
+	if got := evalTool(p, "mcp__github__delete_repo", map[string]any{}); got != policy.ActionDeny {
+		t.Errorf("want default deny, got %s", got)
+	}
+}
+
+func TestInput_MatchingValueTriggersRule(t *testing.T) {
+	p := loadYAML(t, mcpPolicyYAML)
+	r := p.Evaluate(policy.Activation{
+		ToolName:  "mcp__github__create_issue",
+		ToolInput: map[string]any{"repo": "secret-org/app", "title": "x"},
+	})
+	if r.Action != policy.ActionDeny || r.Reason != "no issues in protected orgs" {
+		t.Errorf("want deny with reason, got %s: %s", r.Action, r.Reason)
+	}
+}
+
+func TestInput_OtherValueDoesNotTriggerRule(t *testing.T) {
+	p := loadYAML(t, mcpPolicyYAML)
+	got := evalTool(p, "mcp__github__create_issue", map[string]any{"repo": "afry23/hookguard"})
+	if got != policy.ActionAllow {
+		t.Errorf("want allow, got %s", got)
+	}
+}
+
+func TestInput_MissingKeyIsNotAnError(t *testing.T) {
+	// The input rule must simply not apply when the key is absent, rather than
+	// escalating to ask like a raw when: expression would.
+	p := loadYAML(t, mcpPolicyYAML)
+	got := evalTool(p, "mcp__github__create_issue", map[string]any{"title": "no repo given"})
+	if got != policy.ActionAllow {
+		t.Errorf("want allow (input rule skipped), got %s", got)
+	}
+}
+
+func TestInput_UnlistedKeysAreIgnored(t *testing.T) {
+	p := loadYAML(t, mcpPolicyYAML)
+	got := evalTool(p, "mcp__fs__read", map[string]any{"path": "/etc/passwd", "encoding": "utf8", "extra": 1})
+	if got != policy.ActionDeny {
+		t.Errorf("want deny, got %s", got)
+	}
+}
+
+func TestInput_NonStringValuesCompareAsStrings(t *testing.T) {
+	p := loadYAML(t, mcpPolicyYAML)
+	// JSON numbers decode to float64.
+	if got := evalTool(p, "mcp__db__query", map[string]any{"limit": float64(0)}); got != policy.ActionAsk {
+		t.Errorf("limit 0: want ask, got %s", got)
+	}
+	if got := evalTool(p, "mcp__db__query", map[string]any{"limit": float64(10)}); got != policy.ActionDeny {
+		t.Errorf("limit 10: want default deny, got %s", got)
+	}
+}
+
+func TestInput_ScalarOrListAccepted(t *testing.T) {
+	// "path" is written as a scalar, "repo" as a list in mcpPolicyYAML; both load.
+	loadYAML(t, mcpPolicyYAML)
+}
+
+func TestOnError_SkipIgnoresMissingKey(t *testing.T) {
+	p := loadYAML(t, `
+version: 1
+default_action: allow
+rules:
+  - tools: ["mcp__x__run"]
+    when: 'tool_input.cmd.startsWith("rm")'
+    on_error: skip
+    action: deny
+`)
+	if got := evalTool(p, "mcp__x__run", map[string]any{}); got != policy.ActionAllow {
+		t.Errorf("missing key with on_error=skip: want allow, got %s", got)
+	}
+	if got := evalTool(p, "mcp__x__run", map[string]any{"cmd": "rm -rf /"}); got != policy.ActionDeny {
+		t.Errorf("present key: want deny, got %s", got)
+	}
+}
+
+func TestOnError_DefaultStillAsks(t *testing.T) {
+	p := loadYAML(t, `
+version: 1
+default_action: allow
+rules:
+  - tools: ["mcp__x__run"]
+    when: 'tool_input.cmd.startsWith("rm")'
+    action: deny
+`)
+	if got := evalTool(p, "mcp__x__run", map[string]any{}); got != policy.ActionAsk {
+		t.Errorf("want ask on runtime error by default, got %s", got)
+	}
+}
+
+func TestOnError_SkipDoesNotHideOtherDeny(t *testing.T) {
+	p := loadYAML(t, `
+version: 1
+default_action: allow
+rules:
+  - tools: ["mcp__x__run"]
+    when: 'tool_input.cmd.startsWith("rm")'
+    on_error: skip
+    action: deny
+  - tools: ["mcp__x__*"]
+    action: deny
+`)
+	if got := evalTool(p, "mcp__x__run", map[string]any{}); got != policy.ActionDeny {
+		t.Errorf("want deny from second rule, got %s", got)
+	}
+}
+
+func TestLoad_InvalidSugarCombinations(t *testing.T) {
+	cases := map[string]string{
+		"input without tools": `
+  - when: "true"
+    input: {a: "b"}
+    action: deny`,
+		"bad on_error": `
+  - tools: ["x"]
+    on_error: ignore
+    action: deny`,
+		"bad tools glob": `
+  - tools: ["mcp__[x"]
+    action: deny`,
+		"bad input glob": `
+  - tools: ["x"]
+    input: {a: "[b"}
+    action: deny`,
+		"input not scalar or list": `
+  - tools: ["x"]
+    input: {a: {b: c}}
+    action: deny`,
+	}
+	for name, rule := range cases {
+		tmp := filepath.Join(t.TempDir(), "p.yaml")
+		_ = os.WriteFile(tmp, []byte("version: 1\nrules:"+rule+"\n"), 0o644)
+		if _, err := policy.Load(tmp); err == nil {
+			t.Errorf("%s: want load error, got nil", name)
+		}
+	}
+}
+
+func TestInput_BoolNullAndNonScalar(t *testing.T) {
+	p := loadYAML(t, `
+version: 1
+default_action: allow
+rules:
+  - tools: ["mcp__x__run"]
+    input:
+      force: "true"
+    action: deny
+`)
+	if got := evalTool(p, "mcp__x__run", map[string]any{"force": true}); got != policy.ActionDeny {
+		t.Errorf("bool true: want deny, got %s", got)
+	}
+	if got := evalTool(p, "mcp__x__run", map[string]any{"force": false}); got != policy.ActionAllow {
+		t.Errorf("bool false: want allow, got %s", got)
+	}
+	if got := evalTool(p, "mcp__x__run", map[string]any{"force": nil}); got != policy.ActionAllow {
+		t.Errorf("null: want allow (never matches), got %s", got)
+	}
+	// A nested object cannot be globbed: error, so the call escalates to ask.
+	if got := evalTool(p, "mcp__x__run", map[string]any{"force": map[string]any{"a": 1}}); got != policy.ActionAsk {
+		t.Errorf("object: want ask, got %s", got)
+	}
+}

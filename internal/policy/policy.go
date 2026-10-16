@@ -60,9 +60,16 @@ type Rule struct {
 	// parameter names and switch names (value not compared -- see ADR 0005).
 	Cmdlet string `yaml:"cmdlet"`
 
-	// Path sugar (Read/Edit/Write).
+	// Tools lists tool_name values this rule applies to. Entries may be
+	// globs (e.g. "mcp__github__*"). Used by the path/input sugar below and
+	// on its own to match every call to the listed tools.
 	Tools []string `yaml:"tools"`
-	Path  string   `yaml:"path"`
+	// Path is a glob matched against tool_input.file_path (Read/Edit/Write).
+	Path string `yaml:"path"`
+	// Input constrains individual tool_input keys (e.g. MCP tool arguments).
+	// Each key must be present and its value must match one of the globs; a
+	// missing key means the rule does not apply. Keys not listed are ignored.
+	Input map[string]StringList `yaml:"input"`
 
 	// Raw CEL, ANDed with any sugar expression present.
 	When string `yaml:"when"`
@@ -70,15 +77,48 @@ type Rule struct {
 	Action Action `yaml:"action"`
 	Reason string `yaml:"reason"`
 
+	// OnError selects what a CEL runtime error (e.g. a tool_input key that is
+	// absent) means for this rule: "ask" (default) escalates the call to ask,
+	// "skip" treats the rule as not matching.
+	OnError string `yaml:"on_error"`
+
 	// set by Load(), not from YAML.
 	program    cel.Program
-	scopeTools map[string]bool // nil = evaluate for every tool_name
+	scopeMatch func(toolName string) bool // nil = evaluate for every tool_name
+}
+
+// StringList is a YAML value that may be written as a single string or as a
+// list of strings.
+type StringList []string
+
+// UnmarshalYAML implements yaml.Unmarshaler.
+func (l *StringList) UnmarshalYAML(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		*l = StringList{n.Value}
+		return nil
+	case yaml.SequenceNode:
+		var out []string
+		if err := n.Decode(&out); err != nil {
+			return err
+		}
+		*l = out
+		return nil
+	default:
+		return fmt.Errorf("line %d: expected a string or a list of strings", n.Line)
+	}
 }
 
 // Policy is the root configuration object loaded from hookguard.yaml.
 type Policy struct {
 	Version  int    `yaml:"version"`
 	AuditLog string `yaml:"audit_log"`
+
+	// AuditToolInput additionally records tool_input (string values
+	// truncated) in the audit log for tools that do not already log a
+	// command. Off by default because inputs can contain sensitive data.
+	// Useful to discover MCP tool names and parameters.
+	AuditToolInput bool `yaml:"audit_tool_input"`
 
 	// DefaultAction is the fallback when no rule matches a tool call.
 	// Defaults to "deny" (secure default) when empty.
@@ -201,7 +241,7 @@ func (p *Policy) Evaluate(a Activation) EvalResult {
 	for i := range p.Rules {
 		r := &p.Rules[i]
 
-		if r.scopeTools != nil && !r.scopeTools[a.ToolName] {
+		if r.scopeMatch != nil && !r.scopeMatch(a.ToolName) {
 			continue
 		}
 
@@ -221,6 +261,9 @@ func (p *Policy) Evaluate(a Activation) EvalResult {
 
 		out, _, err := r.program.Eval(vars)
 		if err != nil {
+			if r.OnError == "skip" {
+				continue
+			}
 			// Runtime error: this rule counts as matched with action "ask" so
 			// it participates in severity resolution instead of being
 			// silently dropped (a deny elsewhere still wins).

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -34,7 +35,14 @@ type testCase struct {
 	Raw      string
 	Tool     string
 	Value    string
+	Input    map[string]any // set for mcp__* tools, parsed from the JSON value
 	Expected policy.Action
+}
+
+// isMCPTool reports whether tool is an MCP tool name (mcp__<server>__<tool>).
+// Testfile lines for MCP tools carry the whole tool_input as a JSON object.
+func isMCPTool(tool string) bool {
+	return strings.HasPrefix(tool, "mcp__")
 }
 
 // testFileParseError reports a malformed line found while parsing a testfile.
@@ -81,7 +89,7 @@ func parseTestLine(raw string, lineNo int) (testCase, error) {
 		return testCase{}, &testFileParseError{Line: lineNo, Reason: "missing ':' after tool name"}
 	}
 	tool := strings.TrimSpace(raw[:colonIdx])
-	if !supportedTestTools[tool] {
+	if !supportedTestTools[tool] && !isMCPTool(tool) {
 		return testCase{}, &testFileParseError{Line: lineNo, Reason: fmt.Sprintf("unsupported tool %q", tool)}
 	}
 
@@ -105,11 +113,22 @@ func parseTestLine(raw string, lineNo int) (testCase, error) {
 		return testCase{}, &testFileParseError{Line: lineNo, Reason: fmt.Sprintf("invalid decision %q (want allow/deny/ask)", decisionStr)}
 	}
 
+	var input map[string]any
+	if isMCPTool(tool) {
+		input = map[string]any{}
+		if value != "" {
+			if err := json.Unmarshal([]byte(value), &input); err != nil || input == nil {
+				return testCase{}, &testFileParseError{Line: lineNo, Reason: fmt.Sprintf("MCP tool %q needs a JSON object as value, e.g. {\"key\": \"value\"}", tool)}
+			}
+		}
+	}
+
 	return testCase{
 		Line:     lineNo,
 		Raw:      raw,
 		Tool:     tool,
 		Value:    value,
+		Input:    input,
 		Expected: expected,
 	}, nil
 }
@@ -235,9 +254,13 @@ func runTestMode(args []string, stdout, stderr io.Writer) int {
 
 	passed := 0
 	for _, tc := range cases {
+		toolInput := toolInputFor(tc.Tool, tc.Value)
+		if tc.Input != nil {
+			toolInput = tc.Input
+		}
 		input := hookInput{
 			ToolName:  tc.Tool,
-			ToolInput: toolInputFor(tc.Tool, tc.Value),
+			ToolInput: toolInput,
 		}
 		action, reason := decide(input, pol, h)
 		if action == tc.Expected {

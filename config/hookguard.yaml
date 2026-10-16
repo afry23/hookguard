@@ -28,6 +28,11 @@ default_action: deny
 # here. Leave empty ("") to disable.
 audit_log: "~/.claude/hookguard-audit.jsonl"
 
+# Also record tool_input (strings truncated to 256 chars) for tools that do not
+# log a command, such as MCP tools. Handy to discover tool names and argument
+# keys while writing rules; off by default because inputs may contain secrets.
+audit_tool_input: false
+
 # Fired when a Bash command contains constructs that cannot be safely
 # analysed statically: eval, exec, source, sh -c, xargs, command substitution
 # $(...), arithmetic commands, control structures (if/while/for), etc.
@@ -267,3 +272,45 @@ rules:
     when: 'tool_input.file_path.matches("id_rsa$")'
     action: deny
     reason: "reading SSH private keys is not allowed"
+
+  # ── MCP tools ───────────────────────────────────────────────────────────
+  # Claude Code names MCP tools mcp__<server>__<tool>. Find them with /mcp, or
+  # set audit_tool_input: true and read tool_name/tool_input from the audit
+  # log. `tools:` entries may be globs; `input:` constrains single arguments
+  # (the JSON keys of the tool's inputSchema). Arguments you do not list are
+  # ignored, and a call that lacks a listed key simply does not match the rule.
+  # More: docs/configuration.md#mcp-tools
+
+  # Read-only tools of a server, selected by wildcard.
+  - tools: ["mcp__github__get_*", "mcp__github__list_*", "mcp__github__search_*"]
+    action: allow
+    reason: "read-only GitHub tools"
+
+  # Write tools ask by default ...
+  - tools: ["mcp__github__create_*", "mcp__github__update_*"]
+    action: ask
+    reason: "writes to GitHub"
+
+  # ... and are denied outright for certain owners. Only `owner` matters here;
+  # title, body, ... are "don't care". Several globs for one key are ORed.
+  - tools: ["mcp__github__create_*", "mcp__github__update_*"]
+    input:
+      owner: ["secret-org", "archive"]
+    action: deny
+    reason: "no changes in protected organisations"
+
+  # input: values are compared as strings and use glob syntax; "*DROP *"
+  # matches any statement that contains "DROP ".
+  - tools: ["mcp__postgres__query"]
+    input:
+      sql: ["*DROP *", "*DELETE *", "*TRUNCATE *"]
+    action: deny
+    reason: "destructive SQL"
+
+  # Raw CEL for what input: cannot express. on_error: skip makes calls without
+  # a "path" key not apply to this rule instead of escalating to ask.
+  - tools: ["mcp__filesystem__*"]
+    when: 'tool_input.path.startsWith("/etc/") || tool_input.path.contains("/.ssh/")'
+    on_error: skip
+    action: deny
+    reason: "system and SSH directories are off limits"

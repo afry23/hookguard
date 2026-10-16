@@ -55,9 +55,28 @@ populate:
 | `WebFetch` | `url` |
 | `WebSearch` | `query` |
 
+MCP tools (names starting with `mcp__`) are supported too, see
+[MCP tools](#mcp-tools) below.
+
 `apply_patch` is intentionally **not** supported: its multi-line patch text
 doesn't fit a one-line testfile format. Test `apply_patch` behavior with Go
 unit tests in `cmd/hookguard/main_test.go` instead.
+
+### MCP tools
+
+For tools named `mcp__<server>__<tool>` the value is the complete `tool_input`
+as a JSON object. An empty value means `{}`.
+
+```text
+mcp__github__get_issue:    {"owner": "afry23", "repo": "hookguard", "number": 1} -> allow
+mcp__github__create_issue: {"owner": "secret-org", "title": "x"}                 -> deny
+mcp__github__create_issue: {"title": "no owner given"}                           -> ask
+mcp__github__list_commits: -> allow
+```
+
+A value that is not a JSON object is a parse error. Tool names outside the
+list above that do not start with `mcp__` are still rejected, which catches
+typos like `bash`.
 
 ## Fail-fast parsing
 

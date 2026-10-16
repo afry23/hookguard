@@ -5,6 +5,7 @@ go 1.23.0
 require (
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/google/cel-go v0.29.0
+	google.golang.org/protobuf v1.36.10
 	gopkg.in/yaml.v3 v3.0.1
 	mvdan.cc/sh/v3 v3.9.0
 )
@@ -16,5 +17,4 @@ require (
 	golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20240826202546-f6391c0de4c7 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240826202546-f6391c0de4c7 // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
 )

@@ -23,7 +23,8 @@ expressions read it as the `tool_name` variable.
 | `LS` | Claude Code | List a directory | generic via `tools:`/`when` |
 | `WebFetch` | Claude Code | Fetch a URL | generic via `tools:`/`when` |
 | `WebSearch` | Claude Code | Web search | generic via `tools:`/`when` |
-| *(any other)* | Claude Code (MCP tools, `Task`, `NotebookEdit`, …) | any tool without dedicated parsing | passed through to CEL as-is; only matchable via `tools: ["<Name>"]` or `when: tool_name == "<Name>"`, `tool_input` stays a generic map |
+| `mcp__<server>__<tool>` | Claude Code | MCP server tool | passed through to CEL as-is; match with `tools:` (wildcards allowed, e.g. `mcp__github__*`), constrain arguments with `input:` — see [MCP tools](configuration.md#mcp-tools) |
+| *(any other)* | Claude Code (`Task`, `NotebookEdit`, …) | any tool without dedicated parsing | passed through to CEL as-is; matchable via `tools: ["<Name>"]` or `when: tool_name == "<Name>"`, `tool_input` stays a generic map |
 
 No rule requires a known `tool_name` — any string works in `tools:`/`when`.
 The list above only covers which names hookguard **specially** parses
@@ -99,7 +100,10 @@ constructed code) and trigger `powershell_opaque_execution_guard` before
 ## 4. `tools:` — generic path/multi-tool sugar field
 
 `tools:` is a list of arbitrary `tool_name` values (see the table in section
-1 above). Combined with `path:` it matches `tool_input.file_path` via glob —
+1 above). An entry containing a glob character (`*`, `?`, `[`, `{`) is matched
+as a glob over the tool name, e.g. `mcp__github__*`; all other entries are
+exact. Combined with `input:` it constrains individual `tool_input` keys (see
+[MCP tools](configuration.md#mcp-tools)). Combined with `path:` it matches `tool_input.file_path` via glob —
 useful for `Read`/`Edit`/`Write` (and `apply_patch` segments, which are
 internally treated as `Edit`/`Write`). Without `path:` it matches every call
 to the listed tools, regardless of payload content.

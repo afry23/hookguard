@@ -25,6 +25,7 @@ version: 1
 default_action: deny
 
 audit_log: "~/.claude/hookguard-audit.jsonl"
+audit_tool_input: false
 
 opaque_execution_guard:
   action: ask
@@ -67,6 +68,22 @@ audit_log: "~/.claude/hookguard-audit.jsonl"
 ```
 
 See [Audit log format](#audit-log-format) below for the record schema and example `jq` queries.
+
+---
+
+### `audit_tool_input`
+
+Optional, default `false`. When `true`, the audit log additionally records the
+`tool_input` of every call whose tool does not already log a command
+(everything except `Bash`, `PowerShell` and `apply_patch`) — MCP tools,
+`Read`, `WebFetch`, and so on. String values are truncated to 256 characters.
+
+This is the easiest way to discover the exact tool names and argument keys an
+MCP server sends; see [MCP tools](#mcp-tools).
+
+> **Privacy:** tool inputs can contain secrets or personal data (file contents
+> passed to `Write`, API payloads, search queries). Enable this temporarily
+> while writing rules, or only on machines where the log file is protected.
 
 ---
 
@@ -202,8 +219,9 @@ Use these to match file-level operations by the tool name and a glob pattern on 
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `tools` | list of strings | Tool names this rule applies to, e.g. `["Read", "Edit", "Write"]`. |
+| `tools` | list of strings | Tool names this rule applies to, e.g. `["Read", "Edit", "Write"]`. Entries may be globs such as `"mcp__github__*"` (see [MCP tools](#mcp-tools)). |
 | `path` | glob string | Matched against `tool_input.file_path` using `github.com/bmatcuk/doublestar/v4` glob semantics (`**` crosses directory boundaries). Requires `tools`. |
+| `input` | map of key → glob or list of globs | Matched against individual `tool_input` keys, e.g. the arguments of an MCP tool. Requires `tools`. A key that is absent makes the rule not apply; keys you do not list are ignored. See [MCP tools](#mcp-tools). |
 
 ```yaml
 # Block reading .env files
@@ -225,6 +243,32 @@ Use these to match file-level operations by the tool name and a glob pattern on 
 - tools: ["Read", "Edit", "Write"]
   action: ask
 ```
+
+---
+
+### `on_error:` — runtime errors in a rule
+
+By default a CEL **runtime error** (for example `tool_input.file_path` when the
+call has no such key) makes the rule count as matched with action `ask`, so a
+broken or surprising input can never silently become `allow` (see
+[CEL error handling](#cel-error-handling)).
+
+Set `on_error: skip` on a rule to treat such an error as "this rule does not
+apply" instead. Use it for `when:` expressions that read optional keys:
+
+```yaml
+- tools: ["mcp__shell__run"]
+  when: 'tool_input.command.startsWith("rm ")'
+  on_error: skip          # calls without a "command" key are not my concern
+  action: deny
+```
+
+| Value | Effect of a runtime error |
+|-------|---------------------------|
+| `ask` (default) | rule matches with action `ask` |
+| `skip` | rule is ignored |
+
+`skip` also hides typos in key names — the rule then silently never fires. Prefer the `input:` sugar field when it is enough: it never raises a "missing key" error in the first place. For other `when:` expressions, `has(tool_input.key) && ...` is the explicit alternative.
 
 ---
 
@@ -308,7 +352,110 @@ hookguard rejects invalid rule combinations at load time:
 | `subcommand` without `tool` | `rule sets 'subcommand' without 'tool'` |
 | `deny_flags` without `tool` or `cmdlet` | `rule sets 'deny_flags' without 'tool' or 'cmdlet'` |
 | `path` without `tools` | `rule sets 'path' without 'tools'` |
+| `input` without `tools` | `rule sets 'input' without 'tools'` |
+| `on_error` other than `ask`/`skip` | `invalid on_error "…" (want ask or skip)` |
+| invalid glob in `tools`, `path` or `input` | `invalid glob pattern "…"` |
 | No condition at all | `rule has no condition (no 'tool', 'cmdlet', 'tools', or 'when')` |
+
+---
+
+## MCP tools
+
+MCP tools reach hookguard like any other tool call. In Claude Code the tool
+name is `mcp__<server>__<tool>` (for example `mcp__github__create_issue`) and
+`tool_input` holds the arguments the agent passes to the tool. hookguard has no
+built-in knowledge of MCP servers, so everything is matched with the generic
+fields `tools:`, `input:` and `when:`.
+
+### Matching tools: wildcards in `tools:`
+
+Entries in `tools:` without glob characters (`* ? [ {`) are compared exactly.
+Entries with them are globs over the tool name, so a whole server or a family
+of tools can be covered by one line:
+
+```yaml
+- tools: ["mcp__github__get_*", "mcp__github__list_*", "mcp__github__search_*"]
+  action: allow                      # read-only GitHub tools
+
+- tools: ["mcp__filesystem__*"]      # every tool of the "filesystem" server
+  action: ask
+```
+
+Because severity wins over order, a broad `allow` like the first rule never
+overrides a `deny` or `ask` from a narrower rule.
+
+### Matching arguments: `input:`
+
+`input:` constrains single `tool_input` keys. Each key maps to a glob, or to a
+list of globs of which one must match. You only list the arguments you care
+about; all others are ignored ("I don't care").
+
+```yaml
+- tools: ["mcp__github__create_issue", "mcp__github__create_pull_request"]
+  input:
+    owner: ["secret-org", "archive"]
+  action: deny
+  reason: "no issues or PRs in protected organisations"
+
+- tools: ["mcp__postgres__query"]
+  input:
+    sql: ["*DROP *", "*DELETE *", "*TRUNCATE *"]
+  action: deny
+```
+
+Semantics:
+
+- **A missing key is not an error.** If the call has no `owner` argument, the
+  first rule simply does not apply — it does not turn into `ask`.
+- **All listed keys must match** (AND). Several globs for one key are ORed.
+- **Values are compared as strings.** Numbers and booleans work too: `limit: "0"`
+  matches `0`, `force: "true"` matches `true`. `null` never matches. A nested
+  object or list cannot be globbed and counts as a runtime error (→ `ask`, or
+  skipped with `on_error: skip`).
+- **Glob rules:** doublestar semantics. `*` does not cross `/`, `**` does. For
+  free text such as SQL or URLs use `*…*` or `**` — `"*DROP *"` matches any
+  string containing `DROP `.
+- Matching is case-sensitive.
+
+For conditions `input:` cannot express (negation, numeric comparison, several
+keys combined with OR), use `when:` together with `on_error: skip` or `has()`:
+
+```yaml
+# deny unless the repository is in the allowed owner
+- tools: ["mcp__github__create_issue"]
+  when: 'has(tool_input.owner) && !(tool_input.owner in ["afry23"])'
+  action: deny
+```
+
+### Finding tool names and arguments
+
+hookguard does not list MCP tools itself; the information comes from the
+server and from your agent:
+
+1. **Tool names.** In Claude Code run `/mcp` to see the configured servers and
+   the tools each one exposes. The full name is `mcp__<server>__<tool>`, where
+   `<server>` is the name from your MCP configuration.
+2. **Arguments.** Every MCP tool declares a JSON `inputSchema`; its
+   `properties` are exactly the keys you can use in `input:` or
+   `tool_input.<key>`. The server's documentation lists them, or you can inspect
+   the live server with the
+   [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
+   (`npx @modelcontextprotocol/inspector`) → *Tools* → *List Tools*.
+3. **Real calls.** Set `audit_tool_input: true`, let the agent use the tool,
+   and read the logged name and arguments:
+
+   ```bash
+   jq 'select(.tool_name | startswith("mcp__")) | {tool_name, tool_input, action}' \
+     ~/.claude/hookguard-audit.jsonl
+   ```
+
+   This also works for Codex. Check the logged `tool_name` there, since other
+   hosts may name MCP tools differently.
+
+### Testing MCP rules
+
+`hookguard test` understands MCP tools: write the whole `tool_input` as a JSON
+object after the tool name. See [testing.md](testing.md#mcp-tools).
 
 ---
 
@@ -337,6 +484,7 @@ Each entry is a JSON object on its own line (JSONL):
 | `cwd` | always | working directory at time of call |
 | `tool_name` | always | e.g. `"Bash"`, `"Read"`, `"PowerShell"` |
 | `cmd` | `tool_name` is `Bash` or `PowerShell` | the raw command string |
+| `tool_input` | `audit_tool_input: true`, other tools | the call's arguments, string values truncated to 256 characters |
 | `action` | always | `allow`, `deny`, or `ask` |
 | `reason` | always | human-readable reason string |
 
@@ -537,4 +685,19 @@ rules:
     when: 'tool_input.file_path.matches("id_rsa$")'
     action: deny
     reason: "reading SSH private keys is not allowed"
+
+  # ── MCP tools (see "MCP tools" above) ────────────────────────────────────
+  - tools: ["mcp__github__get_*", "mcp__github__list_*", "mcp__github__search_*"]
+    action: allow
+    reason: "read-only GitHub tools"
+
+  - tools: ["mcp__github__create_*", "mcp__github__update_*"]
+    action: ask
+    reason: "writes to GitHub"
+
+  - tools: ["mcp__github__create_*", "mcp__github__update_*"]
+    input:
+      owner: ["secret-org", "archive"]
+    action: deny
+    reason: "no changes in protected organisations"
 ```

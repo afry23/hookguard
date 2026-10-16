@@ -280,3 +280,73 @@ func TestRunTestMode_CodexAskDowngrade(t *testing.T) {
 		t.Errorf("want exit 0 (ask downgraded to deny under codex), got %d; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 }
+
+// ─── MCP tools ────────────────────────────────────────────────────────────────
+
+func TestParseTestLine_MCPTool(t *testing.T) {
+	got, err := parseTestLine(`mcp__github__create_issue: {"repo": "a/b", "n": 2} -> deny`, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Tool != "mcp__github__create_issue" || got.Expected != policy.ActionDeny {
+		t.Errorf("got %+v", got)
+	}
+	if got.Input["repo"] != "a/b" || got.Input["n"] != float64(2) {
+		t.Errorf("input not parsed: %+v", got.Input)
+	}
+}
+
+func TestParseTestLine_MCPToolEmptyInput(t *testing.T) {
+	got, err := parseTestLine(`mcp__x__ping: -> allow`, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Input == nil || len(got.Input) != 0 {
+		t.Errorf("want empty non-nil input, got %#v", got.Input)
+	}
+}
+
+func TestParseTestLine_MCPToolInvalidJSON(t *testing.T) {
+	for _, raw := range []string{
+		`mcp__x__run: not json -> allow`,
+		`mcp__x__run: ["a"] -> allow`,
+		`mcp__x__run: null -> allow`,
+	} {
+		if _, err := parseTestLine(raw, 3); err == nil || !strings.Contains(err.Error(), "JSON object") {
+			t.Errorf("%q: want JSON object error, got %v", raw, err)
+		}
+	}
+}
+
+func TestParseTestLine_NonMCPUnknownToolStillRejected(t *testing.T) {
+	if _, err := parseTestLine(`foo__bar: {} -> allow`, 1); err == nil {
+		t.Error("want error for non-mcp unknown tool")
+	}
+}
+
+func TestRunTestMode_MCP(t *testing.T) {
+	dir := t.TempDir()
+	policyPath := writeTempFile(t, dir, "hookguard.yaml", `version: 1
+default_action: deny
+rules:
+  - tools: ["mcp__github__*"]
+    action: allow
+  - tools: ["mcp__github__create_issue"]
+    input:
+      repo: "secret/*"
+    action: deny
+`)
+	testFile := writeTempFile(t, dir, "cases.txt", `mcp__github__get_issue: {"number": 1} -> allow
+mcp__github__create_issue: {"repo": "secret/app"} -> deny
+mcp__github__create_issue: {"title": "no repo"} -> allow
+mcp__other__tool: {} -> deny
+`)
+	var stdout, stderr bytes.Buffer
+	code := runTestMode([]string{"--policy", policyPath, testFile}, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("want exit 0, got %d\n%s%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "4/4 passed") {
+		t.Errorf("want 4/4 passed, got:\n%s", stdout.String())
+	}
+}
